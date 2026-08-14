@@ -2,6 +2,8 @@
 pandas>=2.0.0,<3.0.0
 numpy>=1.24.0,<3.0.0
 python-dotenv>=1.0.0
+# data_provider -> src.config -> src.schemas imports Pydantic v2 APIs at startup.
+pydantic>=2.0.0,<3.0.0
 tenacity>=8.2.0
 requests>=2.31.0
 exchange-calendars>=4.13.0

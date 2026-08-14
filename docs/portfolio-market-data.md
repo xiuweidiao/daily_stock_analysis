@@ -98,6 +98,8 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 
 `workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。`intraday` 不增加 cron，只能手动运行。生成后 workflow 提交实际变化的 JSON；若交易日判断跳过或内容无变化，则不产生 commit。
 
+PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.github/requirements-portfolio-pipeline.txt`，再执行 `pip check` 和 `python scripts/portfolio_market_data.py --help`，用于阻止轻量依赖清单与实际启动 import 链再次漂移。
+
 ## JSON 时间与量比示例
 
 ```json

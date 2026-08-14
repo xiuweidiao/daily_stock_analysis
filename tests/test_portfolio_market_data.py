@@ -470,6 +470,27 @@ def test_workflow_crons_and_manual_choices_are_wired() -> None:
     assert "python scripts/portfolio_market_data.py" in workflow
 
 
+def test_portfolio_dependency_smoke_uses_only_lightweight_python311_requirements() -> None:
+    requirements = Path(
+        ".github/requirements-portfolio-pipeline.txt"
+    ).read_text(encoding="utf-8")
+    workflow = Path(
+        ".github/workflows/portfolio-market-data-smoke.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "pydantic>=2.0.0,<3.0.0" in requirements
+    assert "python-version: '3.11'" in workflow
+    assert (
+        "python -m pip install -r .github/requirements-portfolio-pipeline.txt"
+        in workflow
+    )
+    assert "python -m pip check" in workflow
+    assert "python scripts/portfolio_market_data.py --help" in workflow
+    assert "requirements.txt" not in workflow.replace(
+        ".github/requirements-portfolio-pipeline.txt", ""
+    )
+
+
 def test_script_entrypoint_is_locally_runnable() -> None:
     result = subprocess.run(
         [sys.executable, "scripts/portfolio_market_data.py", "--help"],
