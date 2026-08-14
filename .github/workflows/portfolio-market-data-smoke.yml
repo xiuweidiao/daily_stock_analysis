@@ -1,0 +1,37 @@
+name: Portfolio Market Data Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/requirements-portfolio-pipeline.txt'
+      - '.github/workflows/portfolio-market-data*.yml'
+      - 'scripts/portfolio_*.py'
+      - 'data_provider/**'
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  import-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/requirements-portfolio-pipeline.txt
+
+      - name: Install portfolio pipeline dependencies only
+        run: python -m pip install -r .github/requirements-portfolio-pipeline.txt
+
+      - name: Verify dependency closure and script startup
+        run: |
+          python -m pip check
+          python scripts/portfolio_market_data.py --help
