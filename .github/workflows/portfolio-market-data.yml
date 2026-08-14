@@ -11,19 +11,13 @@ on:
       phase:
         description: Snapshot phase to generate
         required: true
-        default: all
+        default: intraday
         type: choice
         options:
           - premarket
           - midday
           - close
           - intraday
-          - all
-      force_non_trading_day:
-        description: Allow generation on a non-trading day (diagnostics only)
-        required: false
-        default: false
-        type: boolean
 
 concurrency:
   group: portfolio-market-data-${{ github.ref }}
@@ -71,14 +65,7 @@ jobs:
           echo "phase=$phase" >> "$GITHUB_OUTPUT"
 
       - name: Generate portfolio JSON
-        env:
-          FORCE_NON_TRADING_DAY: ${{ inputs.force_non_trading_day }}
-        run: |
-          force_arg=""
-          if [ "$FORCE_NON_TRADING_DAY" = "true" ]; then
-            force_arg="--force"
-          fi
-          python scripts/portfolio_market_data.py --phase "${{ steps.phase.outputs.phase }}" $force_arg
+        run: python scripts/portfolio_market_data.py --phase "${{ steps.phase.outputs.phase }}"
 
       - name: Commit updated snapshots
         run: |

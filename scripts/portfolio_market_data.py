@@ -22,25 +22,22 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from data_provider.akshare_fetcher import AkshareFetcher
 from data_provider.baostock_fetcher import BaostockFetcher
-from data_provider.base import BaseFetcher, DataFetchError, DataFetcherManager, normalize_stock_code
+from data_provider.base import BaseFetcher, DataFetcherManager
 from data_provider.efinance_fetcher import EfinanceFetcher
 from data_provider.pytdx_fetcher import PytdxFetcher
 from data_provider.tencent_fetcher import TencentFetcher
+from scripts.portfolio_config import (
+    DEFAULT_CONFIG_PATH,
+    PortfolioConfig,
+    PortfolioConfigError,
+    load_portfolio_config,
+    validate_security_code,
+)
 from src.core.trading_calendar import get_effective_trading_date, is_market_open
 
 LOGGER = logging.getLogger("portfolio_market_data")
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 TIMEZONE_NAME = "Asia/Shanghai"
-
-PORTFOLIO_CODES: Tuple[str, ...] = (
-    "688825",
-    "300442",
-    "688012",
-    "300604",
-    "300274",
-    "159567",
-    "159967",
-)
 
 BENCHMARKS: Mapping[str, str] = {
     "sh000001": "上证指数",
@@ -51,9 +48,12 @@ BENCHMARKS: Mapping[str, str] = {
 
 REPORT_PHASES = ("premarket", "midday", "close")
 PHASES = (*REPORT_PHASES, "intraday")
+OFFICIAL_OUTPUT_DIR = REPOSITORY_ROOT / "data" / "portfolio"
+DIAGNOSTICS_OUTPUT_DIR = OFFICIAL_OUTPUT_DIR / "diagnostics"
 STOCK_FIELDS = (
     "code",
     "name",
+    "tracking_type",
     "latest_price",
     "change_pct",
     "open",
@@ -86,6 +86,10 @@ STOCK_FIELDS = (
 
 class PhaseTimeError(ValueError):
     """Raised when a snapshot phase does not match the Shanghai market clock."""
+
+
+class DiagnosticOutputError(ValueError):
+    """Raised when a diagnostics run could overwrite official snapshots."""
 
 
 class PortfolioSources(Protocol):
@@ -244,8 +248,17 @@ def _is_intraday_session(now: datetime) -> bool:
 
 
 def validate_phase_time(phase: str, now: datetime) -> None:
-    """Protect fixed close and on-demand intraday snapshot semantics."""
-    if phase == "close" and now.timetz().replace(tzinfo=None) < time(15, 0):
+    """Protect every official snapshot with its Shanghai report window."""
+    market_time = now.timetz().replace(tzinfo=None)
+    if phase == "premarket" and not (time(0, 0) <= market_time <= time(8, 50)):
+        raise PhaseTimeError(
+            "premarket snapshot requires Asia/Shanghai time between 00:00 and 08:50"
+        )
+    if phase == "midday" and not (time(11, 30) <= market_time < time(13, 0)):
+        raise PhaseTimeError(
+            "midday snapshot requires Asia/Shanghai time from 11:30 until before 13:00"
+        )
+    if phase == "close" and market_time < time(15, 0):
         raise PhaseTimeError("close snapshot requires Asia/Shanghai time at or after 15:00")
     if phase == "intraday" and not _is_intraday_session(now):
         raise PhaseTimeError(
@@ -278,13 +291,11 @@ def _freshness_status(
 
 
 def validate_portfolio_codes(codes: Iterable[str]) -> Tuple[str, ...]:
-    """Return normalized unique six-digit codes or raise on ambiguous input."""
+    """Return unique plain six-digit codes or raise on ambiguous input."""
     normalized: List[str] = []
     seen = set()
     for raw_code in codes:
-        code = normalize_stock_code(str(raw_code))
-        if not (code.isdigit() and len(code) == 6):
-            raise ValueError(f"unsupported A-share security code: {raw_code!r}")
+        code = validate_security_code(raw_code)
         if code not in seen:
             normalized.append(code)
             seen.add(code)
@@ -420,12 +431,13 @@ def _phase_data_date(phase: str, now: datetime) -> date:
     return now.date()
 
 
-def _empty_stock(code: str, fetched_at: str) -> Dict[str, Any]:
+def _empty_stock(code: str, tracking_type: str, fetched_at: str) -> Dict[str, Any]:
     item = {field: None for field in STOCK_FIELDS}
     item.update(
         {
             "code": code,
             "name": "",
+            "tracking_type": tracking_type,
             "source": "unavailable",
             "source_details": {"history": None, "realtime": None, "volume_ratio": None},
             "fetched_at": fetched_at,
@@ -442,13 +454,14 @@ def _empty_stock(code: str, fetched_at: str) -> Dict[str, Any]:
 def build_stock_item(
     code: str,
     *,
+    tracking_type: str,
     phase: str,
     expected_date: date,
     now: datetime,
     sources: PortfolioSources,
 ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
     fetched_at = now.isoformat()
-    item = _empty_stock(code, fetched_at)
+    item = _empty_stock(code, tracking_type, fetched_at)
     errors: List[Dict[str, str]] = []
     try:
         history, history_source = sources.history(code, end_date=expected_date, days=100)
@@ -531,6 +544,7 @@ def build_stock_item(
         {
             "code": code,
             "name": name,
+            "tracking_type": tracking_type,
             "source": source,
             "source_details": {
                 "history": history_source,
@@ -624,8 +638,8 @@ def build_payload(
     phase: str,
     *,
     sources: PortfolioSources,
+    portfolio: PortfolioConfig,
     now: Optional[datetime] = None,
-    codes: Sequence[str] = PORTFOLIO_CODES,
     allow_phase_time_override: bool = False,
 ) -> Dict[str, Any]:
     if phase not in PHASES:
@@ -641,9 +655,13 @@ def build_payload(
     data_date = _phase_data_date(phase, current)
     errors: List[Dict[str, str]] = []
     stocks: List[Dict[str, Any]] = []
-    for code in validate_portfolio_codes(codes):
+    tracked_securities = portfolio.tracked_securities()
+    if not tracked_securities:
+        LOGGER.warning("portfolio config contains no holdings or watchlist codes; benchmarks only")
+    for code, tracking_type in tracked_securities:
         item, item_errors = build_stock_item(
             code,
+            tracking_type=tracking_type,
             phase=phase,
             expected_date=data_date,
             now=current,
@@ -660,6 +678,9 @@ def build_payload(
         "timezone": TIMEZONE_NAME,
         "market_phase": phase,
         "data_date": data_date.isoformat(),
+        "portfolio_status": "ok" if tracked_securities else "empty",
+        "holdings_codes": list(portfolio.holdings),
+        "watchlist_codes": list(portfolio.watchlist),
         "stocks": stocks,
         "benchmarks": benchmarks,
         "errors": errors,
@@ -676,7 +697,8 @@ def write_payload(payload: Mapping[str, Any], output_path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", choices=(*PHASES, "all"), required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("data/portfolio"))
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--force",
         action="store_true",
@@ -690,15 +712,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_output_dir(
+    requested_output_dir: Optional[Path], *, diagnostics_run: bool
+) -> Path:
+    output_dir = requested_output_dir
+    if output_dir is None:
+        output_dir = DIAGNOSTICS_OUTPUT_DIR if diagnostics_run else OFFICIAL_OUTPUT_DIR
+    if diagnostics_run and output_dir.resolve() == OFFICIAL_OUTPUT_DIR.resolve():
+        raise DiagnosticOutputError(
+            "diagnostics cannot write to the official data/portfolio directory"
+        )
+    return output_dir
+
+
 def generate_snapshots(
     phase_selection: str,
     *,
     sources: PortfolioSources,
+    portfolio: PortfolioConfig,
     now: datetime,
     output_dir: Path,
     allow_phase_time_override: bool = False,
 ) -> List[Path]:
+    if phase_selection == "all" and not allow_phase_time_override:
+        raise PhaseTimeError(
+            "all is diagnostics/tests only; use --allow-phase-time-override"
+        )
     phases = REPORT_PHASES if phase_selection == "all" else (phase_selection,)
+    if any(phase not in PHASES for phase in phases):
+        raise ValueError(f"unsupported market phase: {phase_selection}")
+    if allow_phase_time_override and output_dir.resolve() == OFFICIAL_OUTPUT_DIR.resolve():
+        raise DiagnosticOutputError(
+            "diagnostics cannot write to the official data/portfolio directory"
+        )
     if not allow_phase_time_override:
         for phase in phases:
             validate_phase_time(phase, now)
@@ -708,6 +754,7 @@ def generate_snapshots(
         payload = build_payload(
             phase,
             sources=sources,
+            portfolio=portfolio,
             now=now,
             allow_phase_time_override=allow_phase_time_override,
         )
@@ -727,20 +774,32 @@ def main() -> int:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     now = datetime.now(SHANGHAI_TZ)
-    if not args.force and not is_market_open("cn", now.date()):
-        LOGGER.info("%s is not an A-share trading day; no portfolio files were updated", now.date())
-        return 0
-
-    sources = FreeProjectSources()
     try:
+        portfolio = load_portfolio_config(args.config)
+        diagnostics_run = args.allow_phase_time_override or args.force
+        output_dir = resolve_output_dir(
+            args.output_dir, diagnostics_run=diagnostics_run
+        )
+        if args.phase == "all" and not args.allow_phase_time_override:
+            raise PhaseTimeError(
+                "all is diagnostics/tests only; use --allow-phase-time-override"
+            )
+        if not args.force and not is_market_open("cn", now.date()):
+            LOGGER.info(
+                "%s is not an A-share trading day; no portfolio files were updated",
+                now.date(),
+            )
+            return 0
+        sources = FreeProjectSources()
         generate_snapshots(
             args.phase,
             sources=sources,
+            portfolio=portfolio,
             now=now,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             allow_phase_time_override=args.allow_phase_time_override,
         )
-    except PhaseTimeError as exc:
+    except (DiagnosticOutputError, PhaseTimeError, PortfolioConfigError) as exc:
         LOGGER.error("%s; no portfolio files were updated", exc)
         return 2
     return 0
