@@ -54,7 +54,10 @@ env/
 .cursorrules
 
 # 数据和日志
-/data/
+/data/*
+!/data/portfolio/
+!/data/portfolio/*.json
+/data/portfolio/diagnostics/
 /.llm_usage_hmac_secret
 **/.llm_usage_hmac_secret
 logs/
