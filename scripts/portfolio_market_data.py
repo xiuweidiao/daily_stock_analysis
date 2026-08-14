@@ -9,7 +9,7 @@ import logging
 import math
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 from zoneinfo import ZoneInfo
@@ -49,7 +49,8 @@ BENCHMARKS: Mapping[str, str] = {
     "sh000688": "科创50",
 }
 
-PHASES = ("premarket", "midday", "close")
+REPORT_PHASES = ("premarket", "midday", "close")
+PHASES = (*REPORT_PHASES, "intraday")
 STOCK_FIELDS = (
     "code",
     "name",
@@ -64,6 +65,7 @@ STOCK_FIELDS = (
     "turnover_rate",
     "amplitude",
     "volume_ratio",
+    "volume_vs_5d_avg",
     "MA5",
     "MA10",
     "MA20",
@@ -74,9 +76,16 @@ STOCK_FIELDS = (
     "return_60d",
     "volume_vs_20d_avg",
     "source",
+    "fetched_at",
+    "provider_timestamp",
     "data_timestamp",
+    "freshness_status",
     "status",
 )
+
+
+class PhaseTimeError(ValueError):
+    """Raised when a snapshot phase does not match the Shanghai market clock."""
 
 
 class PortfolioSources(Protocol):
@@ -226,6 +235,48 @@ def _iso_timestamp(value: Any) -> Optional[str]:
     return parsed.isoformat()
 
 
+def _is_intraday_session(now: datetime) -> bool:
+    market_time = now.timetz().replace(tzinfo=None)
+    return (
+        time(9, 30) <= market_time <= time(11, 30)
+        or time(13, 0) <= market_time < time(15, 0)
+    )
+
+
+def validate_phase_time(phase: str, now: datetime) -> None:
+    """Protect fixed close and on-demand intraday snapshot semantics."""
+    if phase == "close" and now.timetz().replace(tzinfo=None) < time(15, 0):
+        raise PhaseTimeError("close snapshot requires Asia/Shanghai time at or after 15:00")
+    if phase == "intraday" and not _is_intraday_session(now):
+        raise PhaseTimeError(
+            "intraday snapshot requires an A-share session: 09:30-11:30 or 13:00-15:00 Asia/Shanghai"
+        )
+
+
+def _freshness_status(
+    provider_timestamp: Optional[str], *, fetched_at: datetime, phase: str
+) -> str:
+    if provider_timestamp is None or phase == "premarket":
+        return "unknown"
+    try:
+        provider_time = pd.Timestamp(provider_timestamp).to_pydatetime()
+    except (TypeError, ValueError):
+        return "unknown"
+    if provider_time.tzinfo is None:
+        provider_time = provider_time.replace(tzinfo=SHANGHAI_TZ)
+    provider_time = provider_time.astimezone(SHANGHAI_TZ)
+    age = fetched_at - provider_time
+    if age < -timedelta(minutes=5):
+        return "unknown"
+    if phase == "close":
+        is_formal_close = (
+            provider_time.date() == fetched_at.date()
+            and provider_time.timetz().replace(tzinfo=None) >= time(15, 0)
+        )
+        return "fresh" if is_formal_close else "stale"
+    return "fresh" if age <= timedelta(minutes=15) else "stale"
+
+
 def validate_portfolio_codes(codes: Iterable[str]) -> Tuple[str, ...]:
     """Return normalized unique six-digit codes or raise on ambiguous input."""
     normalized: List[str] = []
@@ -271,6 +322,7 @@ def calculate_metrics(frame: pd.DataFrame) -> MetricResult:
         "volume": _rounded(latest.get("volume"), 0),
         "amount": _rounded(latest.get("amount"), 2),
         "turnover_rate": None,
+        "volume_ratio": None,
     }
     if values["change_pct"] is None and previous_close not in (None, 0):
         values["change_pct"] = _rounded((float(close.iloc[-1]) / float(previous_close) - 1) * 100)
@@ -285,7 +337,7 @@ def calculate_metrics(frame: pd.DataFrame) -> MetricResult:
         values["amplitude"] = None
 
     previous_five_volume = volume.iloc[-6:-1] if len(volume) >= 6 else pd.Series(dtype=float)
-    values["volume_ratio"] = _rounded(
+    values["volume_vs_5d_avg"] = _rounded(
         float(volume.iloc[-1]) / float(previous_five_volume.mean())
         if len(previous_five_volume) == 5 and previous_five_volume.mean() != 0
         else None
@@ -308,7 +360,34 @@ def calculate_metrics(frame: pd.DataFrame) -> MetricResult:
     return MetricResult(values=values, has_60_day_ma=len(close) >= 60, has_60_day_return=len(close) >= 61)
 
 
-def _overlay_quote(frame: pd.DataFrame, quote: Any, target_date: date) -> pd.DataFrame:
+def _reconciled_quote_volume(
+    frame: pd.DataFrame, quote: Any, target_date: date
+) -> Optional[float]:
+    """Reconcile hand/share quote units when a native volume ratio can anchor them."""
+    raw_volume = _finite_number(getattr(quote, "volume", None))
+    native_ratio = _finite_number(getattr(quote, "volume_ratio", None))
+    if raw_volume is None or raw_volume <= 0 or native_ratio is None or native_ratio <= 0:
+        return raw_volume
+
+    bars = frame.copy()
+    bars["date"] = pd.to_datetime(bars["date"], errors="coerce")
+    bars["volume"] = pd.to_numeric(bars["volume"], errors="coerce")
+    previous = bars[bars["date"].dt.date < target_date].dropna(subset=["volume"])
+    previous_five = previous.sort_values("date")["volume"].tail(5)
+    average_volume = _finite_number(previous_five.mean()) if len(previous_five) == 5 else None
+    if average_volume is None or average_volume <= 0:
+        return raw_volume
+
+    candidates = (raw_volume, raw_volume * 100, raw_volume / 100)
+    return min(
+        candidates,
+        key=lambda candidate: abs(math.log((candidate / average_volume) / native_ratio)),
+    )
+
+
+def _overlay_quote(
+    frame: pd.DataFrame, quote: Any, target_date: date, quote_volume: Optional[float]
+) -> pd.DataFrame:
     bars = frame.copy()
     bars["date"] = pd.to_datetime(bars["date"], errors="coerce")
     bars = bars.dropna(subset=["date"]).sort_values("date")
@@ -317,7 +396,7 @@ def _overlay_quote(frame: pd.DataFrame, quote: Any, target_date: date) -> pd.Dat
         "open": getattr(quote, "open_price", None),
         "high": getattr(quote, "high", None),
         "low": getattr(quote, "low", None),
-        "volume": getattr(quote, "volume", None),
+        "volume": quote_volume,
         "amount": getattr(quote, "amount", None),
         "pct_chg": getattr(quote, "change_pct", None),
     }
@@ -341,25 +420,23 @@ def _phase_data_date(phase: str, now: datetime) -> date:
     return now.date()
 
 
-def _empty_stock(code: str, generated_at: str) -> Dict[str, Any]:
+def _empty_stock(code: str, fetched_at: str) -> Dict[str, Any]:
     item = {field: None for field in STOCK_FIELDS}
     item.update(
         {
             "code": code,
             "name": "",
             "source": "unavailable",
-            "source_details": {"history": None, "realtime": None},
-            "data_timestamp": generated_at,
+            "source_details": {"history": None, "realtime": None, "volume_ratio": None},
+            "fetched_at": fetched_at,
+            "provider_timestamp": None,
+            "data_timestamp": None,
+            "freshness_status": "unknown",
             "data_date": None,
             "status": "error",
         }
     )
     return item
-
-
-def _history_timestamp(frame: pd.DataFrame) -> str:
-    latest_date = pd.to_datetime(frame["date"], errors="coerce").dropna().max().date()
-    return datetime.combine(latest_date, time(15, 0), tzinfo=SHANGHAI_TZ).isoformat()
 
 
 def build_stock_item(
@@ -370,8 +447,8 @@ def build_stock_item(
     now: datetime,
     sources: PortfolioSources,
 ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
-    generated_at = now.isoformat()
-    item = _empty_stock(code, generated_at)
+    fetched_at = now.isoformat()
+    item = _empty_stock(code, fetched_at)
     errors: List[Dict[str, str]] = []
     try:
         history, history_source = sources.history(code, end_date=expected_date, days=100)
@@ -381,7 +458,14 @@ def build_stock_item(
 
     quote, quote_source, quote_errors = sources.quote(code)
     realtime_used = phase != "premarket" and quote is not None
-    calculation_frame = _overlay_quote(history, quote, expected_date) if realtime_used else history
+    quote_volume = (
+        _reconciled_quote_volume(history, quote, expected_date) if realtime_used else None
+    )
+    calculation_frame = (
+        _overlay_quote(history, quote, expected_date, quote_volume)
+        if realtime_used
+        else history
+    )
     try:
         metrics = calculate_metrics(calculation_frame)
     except Exception as exc:
@@ -402,10 +486,11 @@ def build_stock_item(
             "high": getattr(quote, "high", None),
             "low": getattr(quote, "low", None),
             "prev_close": getattr(quote, "pre_close", None),
-            "volume": getattr(quote, "volume", None),
+            "volume": quote_volume,
             "amount": getattr(quote, "amount", None),
             "turnover_rate": getattr(quote, "turnover_rate", None),
             "amplitude": getattr(quote, "amplitude", None),
+            "volume_ratio": getattr(quote, "volume_ratio", None),
         }
         for field, raw_value in quote_fields.items():
             numeric = _rounded(raw_value, 0 if field == "volume" else 4)
@@ -414,7 +499,8 @@ def build_stock_item(
 
     source = quote_source if realtime_used and quote_source else history_source
     provider_timestamp = _iso_timestamp(getattr(quote, "provider_timestamp", None)) if realtime_used else None
-    data_timestamp = provider_timestamp or (generated_at if realtime_used else _history_timestamp(history))
+    freshness_status = _freshness_status(provider_timestamp, fetched_at=now, phase=phase)
+    native_volume_ratio = values.get("volume_ratio") if realtime_used else None
     partial_reasons: List[str] = []
     if last_bar_date != expected_date:
         partial_reasons.append(f"latest bar is {last_bar_date}, expected {expected_date}")
@@ -446,8 +532,15 @@ def build_stock_item(
             "code": code,
             "name": name,
             "source": source,
-            "source_details": {"history": history_source, "realtime": quote_source if realtime_used else None},
-            "data_timestamp": data_timestamp,
+            "source_details": {
+                "history": history_source,
+                "realtime": quote_source if realtime_used else None,
+                "volume_ratio": quote_source if native_volume_ratio is not None else None,
+            },
+            "fetched_at": fetched_at,
+            "provider_timestamp": provider_timestamp,
+            "data_timestamp": provider_timestamp,
+            "freshness_status": freshness_status,
             "data_date": last_bar_date.isoformat(),
             "status": "partial" if partial_reasons else "ok",
         }
@@ -458,8 +551,9 @@ def build_stock_item(
 
 
 def build_benchmarks(
-    *, sources: PortfolioSources, data_date: date, generated_at: str
+    *, sources: PortfolioSources, data_date: date, now: datetime, phase: str
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    fetched_at = now.isoformat()
     rows, source_by_code, provider_errors = sources.benchmarks()
     by_code = {str(row.get("code") or "").lower(): row for row in rows}
     results: List[Dict[str, Any]] = []
@@ -481,7 +575,10 @@ def build_benchmarks(
                     "amount": None,
                     "amplitude": None,
                     "source": "unavailable",
-                    "data_timestamp": generated_at,
+                    "fetched_at": fetched_at,
+                    "provider_timestamp": None,
+                    "data_timestamp": None,
+                    "freshness_status": "unknown",
                     "data_date": data_date.isoformat(),
                     "status": "error",
                 }
@@ -495,6 +592,7 @@ def build_benchmarks(
                 }
             )
             continue
+        provider_timestamp = _iso_timestamp(row.get("provider_timestamp"))
         results.append(
             {
                 "code": code,
@@ -509,7 +607,12 @@ def build_benchmarks(
                 "amount": _rounded(row.get("amount"), 2),
                 "amplitude": _rounded(row.get("amplitude")),
                 "source": source_by_code[code],
-                "data_timestamp": generated_at,
+                "fetched_at": fetched_at,
+                "provider_timestamp": provider_timestamp,
+                "data_timestamp": provider_timestamp,
+                "freshness_status": _freshness_status(
+                    provider_timestamp, fetched_at=now, phase=phase
+                ),
                 "data_date": data_date.isoformat(),
                 "status": "ok" if _finite_number(row.get("current")) is not None else "partial",
             }
@@ -523,6 +626,7 @@ def build_payload(
     sources: PortfolioSources,
     now: Optional[datetime] = None,
     codes: Sequence[str] = PORTFOLIO_CODES,
+    allow_phase_time_override: bool = False,
 ) -> Dict[str, Any]:
     if phase not in PHASES:
         raise ValueError(f"unsupported market phase: {phase}")
@@ -531,6 +635,8 @@ def build_payload(
         current = current.replace(tzinfo=SHANGHAI_TZ)
     else:
         current = current.astimezone(SHANGHAI_TZ)
+    if not allow_phase_time_override:
+        validate_phase_time(phase, current)
     generated_at = current.isoformat()
     data_date = _phase_data_date(phase, current)
     errors: List[Dict[str, str]] = []
@@ -546,7 +652,7 @@ def build_payload(
         stocks.append(item)
         errors.extend(item_errors)
     benchmarks, benchmark_errors = build_benchmarks(
-        sources=sources, data_date=data_date, generated_at=generated_at
+        sources=sources, data_date=data_date, now=current, phase=phase
     )
     errors.extend(benchmark_errors)
     return {
@@ -576,7 +682,45 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="generate on a non-trading day (manual diagnostics only)",
     )
+    parser.add_argument(
+        "--allow-phase-time-override",
+        action="store_true",
+        help="bypass phase clock checks (tests/diagnostics only; never used by the workflow)",
+    )
     return parser.parse_args()
+
+
+def generate_snapshots(
+    phase_selection: str,
+    *,
+    sources: PortfolioSources,
+    now: datetime,
+    output_dir: Path,
+    allow_phase_time_override: bool = False,
+) -> List[Path]:
+    phases = REPORT_PHASES if phase_selection == "all" else (phase_selection,)
+    if not allow_phase_time_override:
+        for phase in phases:
+            validate_phase_time(phase, now)
+
+    written: List[Path] = []
+    for phase in phases:
+        payload = build_payload(
+            phase,
+            sources=sources,
+            now=now,
+            allow_phase_time_override=allow_phase_time_override,
+        )
+        output_path = output_dir / f"{phase}.json"
+        write_payload(payload, output_path)
+        LOGGER.info(
+            "wrote %s (%d stocks, %d errors)",
+            output_path,
+            len(payload["stocks"]),
+            len(payload["errors"]),
+        )
+        written.append(output_path)
+    return written
 
 
 def main() -> int:
@@ -587,13 +731,18 @@ def main() -> int:
         LOGGER.info("%s is not an A-share trading day; no portfolio files were updated", now.date())
         return 0
 
-    phases = PHASES if args.phase == "all" else (args.phase,)
     sources = FreeProjectSources()
-    for phase in phases:
-        payload = build_payload(phase, sources=sources, now=now)
-        output_path = args.output_dir / f"{phase}.json"
-        write_payload(payload, output_path)
-        LOGGER.info("wrote %s (%d stocks, %d errors)", output_path, len(payload["stocks"]), len(payload["errors"]))
+    try:
+        generate_snapshots(
+            args.phase,
+            sources=sources,
+            now=now,
+            output_dir=args.output_dir,
+            allow_phase_time_override=args.allow_phase_time_override,
+        )
+    except PhaseTimeError as exc:
+        LOGGER.error("%s; no portfolio files were updated", exc)
+        return 2
     return 0
 
 

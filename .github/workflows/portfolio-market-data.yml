@@ -17,6 +17,7 @@ on:
           - premarket
           - midday
           - close
+          - intraday
           - all
       force_non_trading_day:
         description: Allow generation on a non-trading day (diagnostics only)

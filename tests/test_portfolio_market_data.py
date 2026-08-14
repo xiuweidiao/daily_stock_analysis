@@ -18,8 +18,10 @@ from scripts.portfolio_market_data import (
     PORTFOLIO_CODES,
     STOCK_FIELDS,
     FreeProjectSources,
+    PhaseTimeError,
     build_payload,
     calculate_metrics,
+    generate_snapshots,
     validate_portfolio_codes,
     write_payload,
 )
@@ -62,6 +64,7 @@ class _FakeSources:
             amount=203750.0,
             turnover_rate=2.1,
             amplitude=2.48,
+            volume_ratio=1.8,
             provider_timestamp="2026-08-14T11:35:00+08:00",
         )
         return quote, "FakeRealtime", []
@@ -106,7 +109,8 @@ def test_metric_definitions_require_full_windows() -> None:
     assert metrics.values["MA60"] == 31.5
     assert metrics.values["return_5d"] == pytest.approx(round((61 / 56 - 1) * 100, 4))
     assert metrics.values["return_60d"] == 6000.0
-    assert metrics.values["volume_ratio"] == pytest.approx(round(1060 / 1057, 4))
+    assert metrics.values["volume_ratio"] is None
+    assert metrics.values["volume_vs_5d_avg"] == pytest.approx(round(1060 / 1057, 4))
     assert metrics.values["volume_vs_20d_avg"] == pytest.approx(round(1060 / 1049.5, 4))
 
     short_metrics = calculate_metrics(frame.tail(60))
@@ -129,9 +133,22 @@ def test_payload_has_stable_schema_for_all_seven_codes(tmp_path: Path) -> None:
     for stock in payload["stocks"]:
         assert set(STOCK_FIELDS).issubset(stock)
         assert stock["source"] == "FakeRealtime"
-        assert stock["source_details"] == {"history": "FakeHistory", "realtime": "FakeRealtime"}
+        assert stock["source_details"] == {
+            "history": "FakeHistory",
+            "realtime": "FakeRealtime",
+            "volume_ratio": "FakeRealtime",
+        }
+        assert stock["volume_ratio"] == 1.8
+        assert stock["fetched_at"] == now.isoformat()
+        assert stock["provider_timestamp"] == "2026-08-14T11:35:00+08:00"
         assert stock["data_timestamp"] == "2026-08-14T11:35:00+08:00"
+        assert stock["freshness_status"] == "fresh"
         assert stock["status"] == "ok"
+    for benchmark in payload["benchmarks"]:
+        assert benchmark["fetched_at"] == now.isoformat()
+        assert benchmark["provider_timestamp"] is None
+        assert benchmark["data_timestamp"] is None
+        assert benchmark["freshness_status"] == "unknown"
 
     output = tmp_path / "midday.json"
     write_payload(payload, output)
@@ -182,15 +199,127 @@ def test_all_source_failure_is_explicit_error_payload() -> None:
     stock = payload["stocks"][0]
     assert stock["status"] == "error"
     assert stock["source"] == "unavailable"
-    assert stock["data_timestamp"] == now.isoformat()
+    assert stock["fetched_at"] == now.isoformat()
+    assert stock["provider_timestamp"] is None
+    assert stock["data_timestamp"] is None
+    assert stock["freshness_status"] == "unknown"
     assert payload["errors"][0]["stage"] == "history"
+
+
+def test_missing_provider_timestamp_never_uses_generated_at_as_market_time() -> None:
+    class _NoProviderTimestampSources(_FakeSources):
+        def quote(self, code: str):
+            quote, source, errors = super().quote(code)
+            quote.provider_timestamp = None
+            return quote, source, errors
+
+    now = datetime(2026, 8, 14, 10, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+    payload = build_payload(
+        "intraday", sources=_NoProviderTimestampSources(), now=now, codes=("159567",)
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["fetched_at"] == payload["generated_at"] == now.isoformat()
+    assert stock["provider_timestamp"] is None
+    assert stock["data_timestamp"] is None
+    assert stock["freshness_status"] == "unknown"
+
+
+def test_native_volume_ratio_reconciles_etf_hand_and_share_units() -> None:
+    class _EtfHandVolumeSources(_FakeSources):
+        def quote(self, code: str):
+            quote, source, errors = super().quote(code)
+            quote.volume = 10
+            quote.volume_ratio = 1.0
+            return quote, source, errors
+
+    now = datetime(2026, 8, 14, 10, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+    payload = build_payload(
+        "intraday", sources=_EtfHandVolumeSources(), now=now, codes=("159567",)
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume_ratio"] == 1.0
+    assert stock["volume"] == 1000
+    assert stock["volume_vs_5d_avg"] == pytest.approx(round(1000 / 1077, 4))
+
+
+def test_close_before_1500_is_rejected_without_writing(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 14, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    with pytest.raises(PhaseTimeError, match="at or after 15:00"):
+        generate_snapshots(
+            "close", sources=_FakeSources(), now=now, output_dir=tmp_path
+        )
+
+    assert not (tmp_path / "close.json").exists()
+
+
+def test_close_freshness_requires_provider_time_at_or_after_1500() -> None:
+    class _EarlyProviderTimestampSources(_FakeSources):
+        def quote(self, code: str):
+            quote, source, errors = super().quote(code)
+            quote.provider_timestamp = "2026-08-14T14:59:00+08:00"
+            return quote, source, errors
+
+    now = datetime(2026, 8, 14, 15, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    payload = build_payload(
+        "close", sources=_EarlyProviderTimestampSources(), now=now, codes=("300442",)
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["provider_timestamp"] == "2026-08-14T14:59:00+08:00"
+    assert stock["data_timestamp"] == stock["provider_timestamp"]
+    assert stock["freshness_status"] == "stale"
+
+
+def test_intraday_session_writes_snapshot(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 14, 10, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    written = generate_snapshots(
+        "intraday", sources=_FakeSources(), now=now, output_dir=tmp_path
+    )
+
+    assert written == [tmp_path / "intraday.json"]
+    payload = json.loads(written[0].read_text(encoding="utf-8"))
+    assert payload["market_phase"] == "intraday"
+    assert len(payload["stocks"]) == 7
+
+
+def test_all_preflights_close_guard_before_writing_any_snapshot(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 14, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    with pytest.raises(PhaseTimeError, match="at or after 15:00"):
+        generate_snapshots("all", sources=_FakeSources(), now=now, output_dir=tmp_path)
+
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_short_history_for_688825_remains_partial_without_fabrication() -> None:
+    class _ShortHistorySources(_FakeSources):
+        def history(self, code: str, *, end_date: date, days: int):
+            assert code == "688825"
+            return _history_frame(rows=15, end=end_date.isoformat()), "FakeHistory"
+
+    now = datetime(2026, 8, 14, 10, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+    payload = build_payload(
+        "intraday", sources=_ShortHistorySources(), now=now, codes=("688825",)
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["status"] == "partial"
+    assert stock["MA20"] is None
+    assert stock["MA60"] is None
+    assert stock["return_20d"] is None
+    assert stock["return_60d"] is None
+    assert "insufficient bars" in stock["status_detail"]
 
 
 def test_workflow_crons_and_manual_choices_are_wired() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
     for cron in ("48 0 * * 1-5", "35 3 * * 1-5", "10 7 * * 1-5"):
         assert cron in workflow
-    for phase in (*("premarket", "midday", "close"), "all"):
+    for phase in (*("premarket", "midday", "close", "intraday"), "all"):
         assert f"- {phase}" in workflow
     assert "python scripts/portfolio_market_data.py" in workflow
 
