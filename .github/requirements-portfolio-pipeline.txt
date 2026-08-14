@@ -1,0 +1,12 @@
+# Token-free dependencies used by scripts/portfolio_market_data.py.
+pandas>=2.0.0,<3.0.0
+numpy>=1.24.0,<3.0.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+requests>=2.31.0
+exchange-calendars>=4.13.0
+efinance>=0.5.5
+akshare>=1.12.0
+pytdx>=1.72
+baostock>=0.8.0
+fake-useragent>=1.4.0
