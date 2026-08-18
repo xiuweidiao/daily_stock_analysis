@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 收紧 A 股持仓快照的阶段写入窗口与诊断目录隔离，并将持仓/关注代码迁移到可原子管理的公开配置文件。
 - [修复] 补齐 A 股持仓轻量工作流的 Pydantic v2 启动依赖，并增加独立 Python 3.11 依赖闭包 smoke。
 - [修复] 将 A 股持仓盘前定时提前至北京时间 08:20，为 GitHub Actions 排队预留时间，并增加 cron 与阶段映射一致性测试。
+- [修复] 根据 scheduled run 实际延迟将 A 股持仓盘前定时调整为北京时间工作日 06:37，并增加 UTC 跨日星期映射与盘前产物契约测试。
 
 ## [3.30.0] - 2026-08-09
 

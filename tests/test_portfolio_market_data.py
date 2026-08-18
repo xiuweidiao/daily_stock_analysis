@@ -30,6 +30,7 @@ from scripts.portfolio_market_data import (
     build_payload,
     calculate_metrics,
     generate_snapshots,
+    main as portfolio_main,
     resolve_output_dir,
     validate_portfolio_codes,
     write_payload,
@@ -322,8 +323,11 @@ def test_native_volume_ratio_reconciles_etf_hand_and_share_units() -> None:
 @pytest.mark.parametrize(
     ("phase", "hour", "minute", "allowed"),
     (
+        ("premarket", 6, 37, True),
         ("premarket", 8, 20, True),
         ("premarket", 8, 48, True),
+        ("premarket", 8, 50, True),
+        ("premarket", 8, 51, False),
         ("premarket", 9, 0, False),
         ("midday", 11, 29, False),
         ("midday", 11, 35, True),
@@ -382,6 +386,69 @@ def test_close_freshness_requires_provider_time_at_or_after_1500() -> None:
     assert stock["provider_timestamp"] == "2026-08-14T14:59:00+08:00"
     assert stock["data_timestamp"] == stock["provider_timestamp"]
     assert stock["freshness_status"] == "stale"
+
+
+def test_premarket_snapshot_uses_configured_pool_and_completed_data_date(
+    tmp_path: Path,
+) -> None:
+    portfolio = load_portfolio_config(DEFAULT_CONFIG_PATH)
+    now = datetime(2026, 8, 17, 6, 37, tzinfo=ZoneInfo("Asia/Shanghai"))
+    output_dir = tmp_path / "data" / "portfolio"
+
+    with patch(
+        "scripts.portfolio_market_data._phase_data_date",
+        return_value=date(2026, 8, 14),
+    ):
+        written = generate_snapshots(
+            "premarket",
+            sources=_FakeSources(),
+            portfolio=portfolio,
+            now=now,
+            output_dir=output_dir,
+        )
+
+    output = output_dir / "premarket.json"
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert written == [output]
+    assert payload["generated_at"] == now.isoformat()
+    assert payload["timezone"] == "Asia/Shanghai"
+    assert payload["market_phase"] == "premarket"
+    assert payload["data_date"] == "2026-08-14"
+    assert payload["holdings_codes"] == list(portfolio.holdings)
+    assert payload["watchlist_codes"] == list(portfolio.watchlist)
+    assert [item["code"] for item in payload["stocks"]] == list(
+        portfolio.holdings + portfolio.watchlist
+    )
+    assert all(item["source"] == "FakeHistory" for item in payload["stocks"])
+    assert all(item["latest_price"] == 81.0 for item in payload["stocks"])
+    assert all(
+        item["source_details"]["realtime"] is None for item in payload["stocks"]
+    )
+    assert len(payload["benchmarks"]) == 4
+
+
+def test_cli_non_trading_day_does_not_write_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "portfolio_market_data.py",
+            "--phase",
+            "premarket",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    with (
+        patch("scripts.portfolio_market_data.is_market_open", return_value=False),
+        patch("scripts.portfolio_market_data.FreeProjectSources") as sources_class,
+    ):
+        assert portfolio_main() == 0
+
+    sources_class.assert_not_called()
+    assert list(tmp_path.glob("*.json")) == []
 
 
 def test_all_is_diagnostics_only_and_writes_nothing_by_default(tmp_path: Path) -> None:
@@ -464,7 +531,7 @@ def test_short_history_for_688825_remains_partial_without_fabrication() -> None:
 def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
     expected_mapping = [
-        ("20 0 * * 1-5", "premarket"),
+        ("37 22 * * 0-4", "premarket"),
         ("35 3 * * 1-5", "midday"),
         ("10 7 * * 1-5", "close"),
     ]
@@ -478,6 +545,20 @@ def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
 
     assert scheduled_crons == [cron for cron, _phase in expected_mapping]
     assert resolve_mapping == expected_mapping
+
+
+def test_premarket_cron_maps_utc_sunday_to_shanghai_monday() -> None:
+    workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
+    assert "37 22 * * 0-4" in workflow
+
+    utc_trigger = datetime(2026, 8, 16, 22, 37, tzinfo=ZoneInfo("UTC"))
+    shanghai_trigger = utc_trigger.astimezone(ZoneInfo("Asia/Shanghai"))
+
+    assert utc_trigger.strftime("%A") == "Sunday"
+    assert shanghai_trigger == datetime(
+        2026, 8, 17, 6, 37, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+    assert shanghai_trigger.strftime("%A") == "Monday"
 
 
 def test_workflow_manual_choices_are_wired() -> None:
