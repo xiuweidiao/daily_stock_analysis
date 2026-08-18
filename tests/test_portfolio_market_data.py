@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import date, datetime
@@ -321,6 +322,7 @@ def test_native_volume_ratio_reconciles_etf_hand_and_share_units() -> None:
 @pytest.mark.parametrize(
     ("phase", "hour", "minute", "allowed"),
     (
+        ("premarket", 8, 20, True),
         ("premarket", 8, 48, True),
         ("premarket", 9, 0, False),
         ("midday", 11, 29, False),
@@ -459,10 +461,27 @@ def test_short_history_for_688825_remains_partial_without_fabrication() -> None:
     assert "insufficient bars" in stock["status_detail"]
 
 
-def test_workflow_crons_and_manual_choices_are_wired() -> None:
+def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
-    for cron in ("48 0 * * 1-5", "35 3 * * 1-5", "10 7 * * 1-5"):
-        assert cron in workflow
+    expected_mapping = [
+        ("20 0 * * 1-5", "premarket"),
+        ("35 3 * * 1-5", "midday"),
+        ("10 7 * * 1-5", "close"),
+    ]
+    scheduled_crons = re.findall(
+        r"^\s*- cron: '([^']+)'$", workflow, flags=re.MULTILINE
+    )
+    resolve_mapping = re.findall(
+        r'elif \[ "\$SCHEDULE_CRON" = "([^"]+)" \]; then\n\s+phase="([^"]+)"',
+        workflow,
+    )
+
+    assert scheduled_crons == [cron for cron, _phase in expected_mapping]
+    assert resolve_mapping == expected_mapping
+
+
+def test_workflow_manual_choices_are_wired() -> None:
+    workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
     for phase in ("premarket", "midday", "close", "intraday"):
         assert f"- {phase}" in workflow
     assert "- all" not in workflow
