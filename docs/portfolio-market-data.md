@@ -92,7 +92,7 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 
 独立 workflow `.github/workflows/portfolio-market-data.yml` 使用 UTC cron，对应北京时间：
 
-- `00:48 UTC` = `08:48 Asia/Shanghai`：premarket
+- `00:20 UTC` = `08:20 Asia/Shanghai`：premarket（提前于 `08:50` 窗口上限触发，为 GitHub scheduled workflow 排队预留时间）
 - `03:35 UTC` = `11:35 Asia/Shanghai`：midday
 - `07:10 UTC` = `15:10 Asia/Shanghai`：close
 
