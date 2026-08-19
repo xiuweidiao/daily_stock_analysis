@@ -16,6 +16,15 @@ from scripts.validate_portfolio_snapshot import (
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+CORE_QUOTE = {
+    "latest_price": 10.2,
+    "prev_close": 10.0,
+    "open": 10.1,
+    "high": 10.5,
+    "low": 9.9,
+    "volume": 1000,
+    "amount": 10200,
+}
 
 
 @pytest.mark.parametrize(
@@ -75,6 +84,18 @@ def test_workflow_crons_convert_to_intended_shanghai_queue_times() -> None:
             datetime(2026, 8, 17, 6, 23, tzinfo=utc),
             datetime(2026, 8, 17, 14, 23, tzinfo=SHANGHAI),
         ),
+        (
+            datetime(2026, 8, 17, 7, 43, tzinfo=utc),
+            datetime(2026, 8, 17, 15, 43, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 17, 8, 43, tzinfo=utc),
+            datetime(2026, 8, 17, 16, 43, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 17, 9, 3, tzinfo=utc),
+            datetime(2026, 8, 17, 17, 3, tzinfo=SHANGHAI),
+        ),
     )
 
     for utc_time, shanghai_time in conversions:
@@ -93,10 +114,25 @@ def _payload(phase: str, generated_at: datetime, data_date: date) -> dict:
         "holdings_codes": ["159567"],
         "watchlist_codes": ["600519"],
         "stocks": [
-            {"code": "159567", "tracking_type": "holding"},
-            {"code": "600519", "tracking_type": "watchlist"},
+            {
+                "code": "159567",
+                "tracking_type": "holding",
+                "status": "ok",
+                **CORE_QUOTE,
+            },
+            {
+                "code": "600519",
+                "tracking_type": "watchlist",
+                "status": "ok",
+                **CORE_QUOTE,
+            },
         ],
-        "benchmarks": [],
+        "benchmarks": [
+            {"code": "sh000001", "status": "ok"},
+            {"code": "sh000300", "status": "ok"},
+            {"code": "sz399006", "status": "ok"},
+            {"code": "sh000688", "status": "ok"},
+        ],
         "errors": [],
     }
 
@@ -180,11 +216,144 @@ def test_snapshot_contract_rejects_security_pool_not_from_config() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "field",
+    ("latest_price", "prev_close", "open", "high", "low", "volume", "amount"),
+)
+def test_snapshot_contract_rejects_null_core_quote_fields(field: str) -> None:
+    generated_at = datetime(2026, 8, 17, 15, 5, tzinfo=SHANGHAI)
+    payload = _payload("close", generated_at, generated_at.date())
+    payload["stocks"][0][field] = None
+    portfolio = PortfolioConfig(
+        version=1, holdings=("159567",), watchlist=("600519",)
+    )
+
+    with (
+        patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
+        patch(
+            "scripts.validate_portfolio_snapshot._phase_data_date",
+            return_value=generated_at.date(),
+        ),
+        pytest.raises(
+            SnapshotContractError,
+            match=rf"field {field} must be a finite number",
+        ),
+    ):
+        validate_snapshot_contract(
+            payload,
+            phase="close",
+            portfolio=portfolio,
+            now=generated_at,
+        )
+
+
+@pytest.mark.parametrize(
+    "value", (float("nan"), float("inf"), "10.2", "not-a-number", True)
+)
+def test_snapshot_contract_rejects_non_finite_latest_price(value: object) -> None:
+    generated_at = datetime(2026, 8, 17, 15, 5, tzinfo=SHANGHAI)
+    payload = _payload("close", generated_at, generated_at.date())
+    payload["stocks"][0]["latest_price"] = value
+    portfolio = PortfolioConfig(
+        version=1, holdings=("159567",), watchlist=("600519",)
+    )
+
+    with (
+        patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
+        patch(
+            "scripts.validate_portfolio_snapshot._phase_data_date",
+            return_value=generated_at.date(),
+        ),
+        pytest.raises(
+            SnapshotContractError,
+            match="field latest_price must be a finite number",
+        ),
+    ):
+        validate_snapshot_contract(
+            payload,
+            phase="close",
+            portfolio=portfolio,
+            now=generated_at,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("latest_price", 0, "latest_price must be greater than zero"),
+        ("prev_close", -1, "prev_close must be greater than zero"),
+        ("high", 9.8, "high must be greater than or equal to low"),
+        ("volume", -1, "volume must be non-negative"),
+        ("amount", -1, "amount must be non-negative"),
+    ),
+)
+def test_snapshot_contract_rejects_invalid_core_quote_values(
+    field: str, value: float, message: str
+) -> None:
+    generated_at = datetime(2026, 8, 17, 15, 5, tzinfo=SHANGHAI)
+    payload = _payload("close", generated_at, generated_at.date())
+    payload["stocks"][0][field] = value
+    portfolio = PortfolioConfig(
+        version=1, holdings=("159567",), watchlist=("600519",)
+    )
+
+    with (
+        patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
+        patch(
+            "scripts.validate_portfolio_snapshot._phase_data_date",
+            return_value=generated_at.date(),
+        ),
+        pytest.raises(SnapshotContractError, match=message),
+    ):
+        validate_snapshot_contract(
+            payload,
+            phase="close",
+            portfolio=portfolio,
+            now=generated_at,
+        )
+
+
+def test_snapshot_contract_allows_partial_short_history_indicators() -> None:
+    generated_at = datetime(2026, 8, 17, 15, 5, tzinfo=SHANGHAI)
+    payload = _payload("close", generated_at, generated_at.date())
+    stock = payload["stocks"][0]
+    stock.update(
+        {
+            "status": "partial",
+            "status_detail": "insufficient bars for MA60/return_60d",
+            "MA20": None,
+            "MA60": None,
+            "return_20d": None,
+            "return_60d": None,
+        }
+    )
+    portfolio = PortfolioConfig(
+        version=1, holdings=("159567",), watchlist=("600519",)
+    )
+
+    with (
+        patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
+        patch(
+            "scripts.validate_portfolio_snapshot._phase_data_date",
+            return_value=generated_at.date(),
+        ),
+    ):
+        validate_snapshot_contract(
+            payload,
+            phase="close",
+            portfolio=portfolio,
+            now=generated_at,
+        )
+
+
 def test_workflow_waits_then_validates_before_phase_scoped_commit() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(
         encoding="utf-8"
     )
 
+    assert workflow.index("Check whether today's close is already ready") < workflow.index(
+        "Wait for scheduled market target"
+    )
     assert workflow.index("Wait for scheduled market target") < workflow.index(
         "Generate portfolio JSON"
     )

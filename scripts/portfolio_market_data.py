@@ -110,6 +110,13 @@ class MetricResult:
     has_60_day_return: bool
 
 
+@dataclass(frozen=True)
+class VolumeReconciliation:
+    value: Optional[float]
+    relative_metrics_reliable: bool
+    detail: Optional[str] = None
+
+
 class FreeProjectSources:
     """Adapter over the repository's existing token-free source implementations."""
 
@@ -343,28 +350,120 @@ def calculate_metrics(frame: pd.DataFrame) -> MetricResult:
     return MetricResult(values=values, has_60_day_ma=len(close) >= 60, has_60_day_return=len(close) >= 61)
 
 
+def _normalize_history_volume(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize daily volume to shares when a source reports exchange lots."""
+    bars = frame.copy()
+    if not {"volume", "amount", "close"}.issubset(bars.columns):
+        return bars
+    volume = pd.to_numeric(bars["volume"], errors="coerce")
+    amount = pd.to_numeric(bars["amount"], errors="coerce")
+    close = pd.to_numeric(bars["close"], errors="coerce")
+    valid = (volume > 0) & (amount > 0) & (close > 0)
+    implied_multiplier = (amount[valid] / (volume[valid] * close[valid])).replace(
+        [math.inf, -math.inf], math.nan
+    ).dropna()
+    if implied_multiplier.empty:
+        return bars
+    median_multiplier = float(implied_multiplier.median())
+    if 20 <= median_multiplier <= 500:
+        bars["volume"] = volume * 100
+    return bars
+
+
+def _quote_volume_in_shares(quote: Any) -> Optional[float]:
+    """Use quote amount and price to distinguish shares from 100-share lots."""
+    raw_volume = _finite_number(getattr(quote, "volume", None))
+    amount = _finite_number(getattr(quote, "amount", None))
+    price = _finite_number(getattr(quote, "price", None))
+    if raw_volume is None or raw_volume <= 0:
+        return raw_volume
+    if amount is None or amount <= 0 or price is None or price <= 0:
+        return raw_volume
+    implied_multiplier = amount / (raw_volume * price)
+    return raw_volume * 100 if 20 <= implied_multiplier <= 500 else raw_volume
+
+
 def _reconciled_quote_volume(
     frame: pd.DataFrame, quote: Any, target_date: date
-) -> Optional[float]:
-    """Reconcile hand/share quote units when a native volume ratio can anchor them."""
-    raw_volume = _finite_number(getattr(quote, "volume", None))
+) -> VolumeReconciliation:
+    """Reconcile quote volume units using provider metadata, then history distribution."""
+    raw_volume = _quote_volume_in_shares(quote)
+    original_volume = _finite_number(getattr(quote, "volume", None))
+    amount = _finite_number(getattr(quote, "amount", None))
+    price = _finite_number(getattr(quote, "price", None))
     native_ratio = _finite_number(getattr(quote, "volume_ratio", None))
-    if raw_volume is None or raw_volume <= 0 or native_ratio is None or native_ratio <= 0:
-        return raw_volume
+    if raw_volume is None or raw_volume <= 0:
+        return VolumeReconciliation(raw_volume, True)
+
+    if amount is not None and amount > 0 and price is not None and price > 0:
+        return VolumeReconciliation(raw_volume, True)
 
     bars = frame.copy()
     bars["date"] = pd.to_datetime(bars["date"], errors="coerce")
     bars["volume"] = pd.to_numeric(bars["volume"], errors="coerce")
-    previous = bars[bars["date"].dt.date < target_date].dropna(subset=["volume"])
-    previous_five = previous.sort_values("date")["volume"].tail(5)
+    previous = bars[
+        (bars["date"].dt.date < target_date) & (bars["volume"] > 0)
+    ].dropna(subset=["volume"])
+    previous_volume = previous.sort_values("date")["volume"]
+    previous_five = previous_volume.tail(5)
     average_volume = _finite_number(previous_five.mean()) if len(previous_five) == 5 else None
-    if average_volume is None or average_volume <= 0:
-        return raw_volume
+    if native_ratio is not None and native_ratio > 0 and average_volume is not None:
+        candidates = (raw_volume, raw_volume * 100, raw_volume / 100)
+        value = min(
+            candidates,
+            key=lambda candidate: abs(
+                math.log((candidate / average_volume) / native_ratio)
+            ),
+        )
+        return VolumeReconciliation(value, True)
+
+    if original_volume is None or len(previous_five) < 5:
+        return VolumeReconciliation(
+            raw_volume,
+            False,
+            "suspected volume unit mismatch: insufficient metadata/history",
+        )
+
+    references = [float(previous_five.median())]
+    previous_twenty = previous_volume.tail(20)
+    if len(previous_twenty) == 20:
+        references.append(float(previous_twenty.median()))
+    if any(reference <= 0 or not math.isfinite(reference) for reference in references):
+        return VolumeReconciliation(
+            raw_volume,
+            False,
+            "suspected volume unit mismatch: unusable history distribution",
+        )
 
     candidates = (raw_volume, raw_volume * 100, raw_volume / 100)
-    return min(
-        candidates,
-        key=lambda candidate: abs(math.log((candidate / average_volume) / native_ratio)),
+    scores = [
+        max(abs(math.log(candidate / reference)) for reference in references)
+        for candidate in candidates
+    ]
+
+    # Preserve genuine same-unit volume spikes up to 10x, with room for normal
+    # differences between the 5-day and 20-day reference distributions.
+    if scores[0] <= math.log(12):
+        return VolumeReconciliation(raw_volume, True)
+
+    ranked = sorted(range(len(candidates)), key=scores.__getitem__)
+    best, second = ranked[:2]
+    best_is_scaled = best != 0
+    clearly_better = scores[0] - scores[best] >= math.log(25)
+    separated_from_runner_up = scores[second] - scores[best] >= math.log(20)
+    plausible_after_scaling = scores[best] <= math.log(10)
+    if (
+        best_is_scaled
+        and clearly_better
+        and separated_from_runner_up
+        and plausible_after_scaling
+    ):
+        return VolumeReconciliation(candidates[best], True)
+
+    return VolumeReconciliation(
+        raw_volume,
+        False,
+        "suspected volume unit mismatch: history distribution is inconclusive",
     )
 
 
@@ -440,12 +539,14 @@ def build_stock_item(
     except Exception as exc:
         errors.append({"scope": "stock", "code": code, "stage": "history", "message": str(exc)})
         return item, errors
+    history = _normalize_history_volume(history)
 
     quote, quote_source, quote_errors = sources.quote(code)
     realtime_used = phase != "premarket" and quote is not None
-    quote_volume = (
+    volume_reconciliation = (
         _reconciled_quote_volume(history, quote, expected_date) if realtime_used else None
     )
+    quote_volume = volume_reconciliation.value if volume_reconciliation else None
     calculation_frame = (
         _overlay_quote(history, quote, expected_date, quote_volume)
         if realtime_used
@@ -463,6 +564,9 @@ def build_stock_item(
         name = sources.name(code)
 
     values = dict(metrics.values)
+    if volume_reconciliation and not volume_reconciliation.relative_metrics_reliable:
+        values["volume_vs_5d_avg"] = None
+        values["volume_vs_20d_avg"] = None
     if realtime_used:
         quote_fields = {
             "latest_price": getattr(quote, "price", None),
@@ -487,6 +591,8 @@ def build_stock_item(
     freshness_status = _freshness_status(provider_timestamp, fetched_at=now, phase=phase)
     native_volume_ratio = values.get("volume_ratio") if realtime_used else None
     partial_reasons: List[str] = []
+    if volume_reconciliation and volume_reconciliation.detail:
+        partial_reasons.append(volume_reconciliation.detail)
     if last_bar_date != expected_date:
         partial_reasons.append(f"latest bar is {last_bar_date}, expected {expected_date}")
     if not metrics.has_60_day_ma or not metrics.has_60_day_return:

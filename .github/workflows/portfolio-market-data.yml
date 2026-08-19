@@ -4,9 +4,12 @@ on:
   schedule:
     # GitHub cron is UTC. Premarket 22:37 Sun-Thu maps to 06:37 Mon-Fri in Shanghai.
     - cron: '37 22 * * 0-4'
-    # Midday/close enter the queue early; the phase gate waits for 11:32/15:05 Shanghai.
+    # Midday/close enter the queue early; close retries compensate for missed/failed runs.
     - cron: '53 2 * * 1-5'
     - cron: '23 6 * * 1-5'
+    - cron: '43 7 * * 1-5'
+    - cron: '43 8 * * 1-5'
+    - cron: '3 9 * * 1-5'
   workflow_dispatch:
     inputs:
       phase:
@@ -59,6 +62,12 @@ jobs:
             phase="midday"
           elif [ "$SCHEDULE_CRON" = "23 6 * * 1-5" ]; then
             phase="close"
+          elif [ "$SCHEDULE_CRON" = "43 7 * * 1-5" ]; then
+            phase="close"
+          elif [ "$SCHEDULE_CRON" = "43 8 * * 1-5" ]; then
+            phase="close"
+          elif [ "$SCHEDULE_CRON" = "3 9 * * 1-5" ]; then
+            phase="close"
           else
             echo "Unknown trigger: $SCHEDULE_CRON" >&2
             exit 1
@@ -68,15 +77,41 @@ jobs:
       - name: Install token-free market data dependencies
         run: pip install -r .github/requirements-portfolio-pipeline.txt
 
+      - name: Check whether today's close is already ready
+        id: close_readiness
+        if: steps.phase.outputs.phase == 'close'
+        run: python scripts/portfolio_close_readiness.py
+
       - name: Wait for scheduled market target
-        if: github.event_name == 'schedule'
-        run: python scripts/portfolio_phase_gate.py --phase "${{ steps.phase.outputs.phase }}"
+        if: >-
+          github.event_name == 'schedule' &&
+          (steps.phase.outputs.phase != 'close' ||
+          steps.close_readiness.outputs.should_generate == 'true')
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
+        run: |
+          if ! python scripts/portfolio_phase_gate.py --phase "$PHASE"; then
+            if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; fi
+            exit 1
+          fi
 
       - name: Generate portfolio JSON
-        run: python scripts/portfolio_market_data.py --phase "${{ steps.phase.outputs.phase }}"
+        if: >-
+          steps.phase.outputs.phase != 'close' ||
+          steps.close_readiness.outputs.should_generate == 'true'
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
+        run: |
+          if ! python scripts/portfolio_market_data.py --phase "$PHASE"; then
+            if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; fi
+            exit 1
+          fi
 
       - name: Validate generated snapshot contract
         id: contract
+        if: >-
+          steps.phase.outputs.phase != 'close' ||
+          steps.close_readiness.outputs.should_generate == 'true'
         env:
           PHASE: ${{ steps.phase.outputs.phase }}
         run: |
@@ -84,9 +119,13 @@ jobs:
           if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
             echo "current snapshot unavailable: no new $snapshot was generated"
             echo "generated=false" >> "$GITHUB_OUTPUT"
+            if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; exit 1; fi
             exit 0
           fi
-          python scripts/validate_portfolio_snapshot.py --phase "$PHASE" --path "$snapshot"
+          if ! python scripts/validate_portfolio_snapshot.py --phase "$PHASE" --path "$snapshot"; then
+            if [ "$PHASE" = "close" ]; then echo "SNAPSHOT_CONTRACT_FAILED"; fi
+            exit 1
+          fi
           echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Commit updated snapshots
@@ -97,6 +136,16 @@ jobs:
           git add -- "data/portfolio/${PHASE}.json"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: update portfolio ${PHASE} data"
-          git pull --rebase origin "$GITHUB_REF_NAME"
-          git push origin "HEAD:$GITHUB_REF_NAME"
+          if ! git commit -m "chore: update portfolio ${PHASE} data"; then
+            if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            exit 1
+          fi
+          if ! git pull --rebase origin "$GITHUB_REF_NAME"; then
+            if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            exit 1
+          fi
+          if ! git push origin "HEAD:$GITHUB_REF_NAME"; then
+            if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            exit 1
+          fi
+          if [ "$PHASE" = "close" ]; then echo "TODAY_CLOSE_GENERATED"; fi

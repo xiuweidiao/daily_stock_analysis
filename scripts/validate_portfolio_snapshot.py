@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,6 +31,24 @@ class SnapshotContractError(ValueError):
     """Raised when a formal snapshot is stale, mislabeled or has the wrong universe."""
 
 
+CORE_QUOTE_FIELDS = (
+    "latest_price",
+    "prev_close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+)
+
+
+def _finite_numeric(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _parse_generated_at(value: Any) -> datetime:
     if not isinstance(value, str):
         raise SnapshotContractError("generated_at must be an ISO-8601 string")
@@ -50,6 +69,7 @@ def validate_snapshot_contract(
     phase: str,
     portfolio: PortfolioConfig,
     now: datetime | None = None,
+    max_generation_age: timedelta | None = MAX_GENERATION_AGE,
 ) -> None:
     """Validate phase, clock, trading date and configured security classification."""
     if phase not in PHASES:
@@ -64,7 +84,9 @@ def validate_snapshot_contract(
     if generated_at.date() != current.date():
         raise SnapshotContractError("current snapshot unavailable: generated_at is not today")
     generation_age = current - generated_at
-    if generation_age < -timedelta(minutes=1) or generation_age > MAX_GENERATION_AGE:
+    if generation_age < -timedelta(minutes=1):
+        raise SnapshotContractError("generated_at cannot be in the future")
+    if max_generation_age is not None and generation_age > max_generation_age:
         raise SnapshotContractError(
             "current snapshot unavailable: generated_at is not from this workflow execution"
         )
@@ -97,6 +119,8 @@ def validate_snapshot_contract(
         raise SnapshotContractError("benchmarks must be an array")
     if not isinstance(errors, list):
         raise SnapshotContractError("errors must be an array")
+    if errors:
+        raise SnapshotContractError("snapshot contains unresolved data errors")
 
     expected_tracking = list(portfolio.tracked_securities())
     actual_tracking = []
@@ -106,6 +130,53 @@ def validate_snapshot_contract(
         actual_tracking.append((stock.get("code"), stock.get("tracking_type")))
     if actual_tracking != expected_tracking:
         raise SnapshotContractError("stocks code/tracking_type does not match portfolio config")
+    for stock in stocks:
+        if stock.get("status") not in {"ok", "partial"}:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} is not usable"
+            )
+        numeric_fields = {}
+        for field in CORE_QUOTE_FIELDS:
+            number = _finite_numeric(stock.get(field))
+            if number is None:
+                raise SnapshotContractError(
+                    f"stock {stock.get('code')!r} field {field} must be a finite number"
+                )
+            numeric_fields[field] = number
+        if numeric_fields["latest_price"] <= 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} latest_price must be greater than zero"
+            )
+        if numeric_fields["prev_close"] <= 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} prev_close must be greater than zero"
+            )
+        if numeric_fields["high"] < numeric_fields["low"]:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} high must be greater than or equal to low"
+            )
+        if numeric_fields["volume"] < 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} volume must be non-negative"
+            )
+        if numeric_fields["amount"] < 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} amount must be non-negative"
+            )
+
+    expected_benchmark_codes = {"sh000001", "sh000300", "sz399006", "sh000688"}
+    actual_benchmark_codes = set()
+    for benchmark in benchmarks:
+        if not isinstance(benchmark, Mapping):
+            raise SnapshotContractError("each benchmarks item must be an object")
+        actual_benchmark_codes.add(benchmark.get("code"))
+        if benchmark.get("status") != "ok":
+            raise SnapshotContractError(
+                f"benchmark {benchmark.get('code')!r} is not usable"
+            )
+    if actual_benchmark_codes != expected_benchmark_codes:
+        raise SnapshotContractError("benchmarks must contain the four required indexes")
+
     expected_status = "ok" if expected_tracking else "empty"
     if payload.get("portfolio_status") != expected_status:
         raise SnapshotContractError(f"portfolio_status must be {expected_status}")

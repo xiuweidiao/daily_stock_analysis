@@ -69,6 +69,7 @@ python scripts/manage_portfolio.py show
 - `volume_ratio`：只使用上游实时行情源原生提供的标准量比；无可信原生字段时为 `null`。
 - `volume_vs_5d_avg`：当前观测 bar 成交量 / 前 5 个完整交易日平均成交量；该指标不等同于行情软件的盘中量比。
 - `volume_vs_20d_avg`：当前观测 bar 成交量 / 前 20 个完整交易日平均成交量。
+- 成交量优先统一换算为“股”。当免费源缺少成交量单位元数据时，管道将原值、100 倍和 1/100 与前 5 日/20 日历史分布比较，仅在 100 倍候选具有明显置信优势时归一化；真实 5～10 倍放量保留原值。无法可靠判断时，两个相对成交量指标为 `null`，证券标记 `partial` 并注明 `suspected volume unit mismatch`。
 - `amplitude`：优先使用实时源；缺失时为 `(最高价 - 最低价) / 昨收 * 100`。
 - 盘前价格、涨跌幅和 OHLCV 固定取上一已完成交易日日线；实时查询仅可用于解析当前证券名称。
 
@@ -94,11 +95,16 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 
 - `22:37 UTC` 周日至周四 = 次日 `06:37 Asia/Shanghai` 周一至周五：premarket（距 `08:50` 窗口上限 133 分钟，为 GitHub scheduled workflow 排队预留时间）
 - `02:53 UTC` = `10:53 Asia/Shanghai`：midday 提前入队，workflow 在 `11:32` 前启动时会等待，`11:32 <= time < 13:00` 立即生成，`13:00` 后明确失败
-- `06:23 UTC` = `14:23 Asia/Shanghai`：close 提前入队，workflow 在 `15:05` 前启动时会等待，`15:05 <= time < 18:00` 立即生成，`18:00` 后视为当日收盘报告已错过时效窗口并明确失败
+- `06:23 UTC` = `14:23 Asia/Shanghai`：close 主任务，在 `15:05` 前启动时等待至 `15:05`
+- `07:43 / 08:43 / 09:03 UTC` = `15:43 / 16:43 / 17:03 Asia/Shanghai`：close 三次自动补偿
+
+四个 close cron 共用同一套 workflow 逻辑。每次采集前先对已有 `close.json` 执行不受“生成后 30 分钟”限制的当日静态契约检查；今日快照已合法时输出 `TODAY_CLOSE_ALREADY_READY` 并不再采集、不改 `generated_at`、不提交。文件缺失或仍是上一交易日时输出 `TODAY_CLOSE_MISSING`；当日文件存在但契约错误时输出 `TODAY_CLOSE_INVALID`，两者才允许补偿生成。
+
+新生成的快照仍必须通过“本次执行 30 分钟内”的严格 validator：顶层不得有未解决 `errors`；每只持仓/关注证券的 `latest_price`、`prev_close`、`open`、`high`、`low`、`volume`、`amount` 必须为有限数值，并满足正价格、`high >= low`、成交量/成交额非负。历史不足导致技术指标为 `null` 仍允许以 `partial` 通过，这与今日核心行情缺失是两个不同契约。四个基准必须全部为 `ok`。只有 push 成功后才输出 `TODAY_CLOSE_GENERATED`；采集、契约或 push 失败分别输出 `CLOSE_GENERATION_FAILED`、`SNAPSHOT_CONTRACT_FAILED`、`PUSH_FAILED`。非交易日输出 `NON_TRADING_DAY_SKIP` 并不进入等待/采集。`18:00` 后若当日 close 仍缺失，phase gate 明确失败，不生成正式文件。
 
 `workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动运行不会等待，直接由 Python 的真实时间窗口保护；`intraday` 不增加 cron。
 
-三个 scheduled phase 共用一个 concurrency group，以避免并发向 `main` 提交产生 push race。三个阶段的等待区间不重叠，因此不会用一个延迟阶段长时间阻塞下一阶段。提交前只 stage 当前 phase 的 JSON，并执行非强制 `git pull --rebase`；如果远端冲突，workflow 失败而不覆盖。
+所有 scheduled run 仍共用一个 concurrency group，以避免并发向 `main` 产生 push race。延迟的 primary 会先完成提交，排队中的 retry 随后重新 checkout 并看到已合法的当日文件，因此幂等退出。提交前只 stage 当前 phase 的 JSON，并执行非强制 `git pull --rebase`；如果远端冲突，workflow 失败而不覆盖。
 
 新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、当日 `generated_at`、阶段时间窗口、`data_date`、持仓/关注列表与 `config/portfolio.json` 及 `tracking_type` 都必须一致。配置证券池非空时 `stocks` 不得整体缺失。交易日判断跳过、未生成新文件或契约失败时，日志输出 `current snapshot unavailable`，不会把旧 JSON commit 成当日成功。
 
