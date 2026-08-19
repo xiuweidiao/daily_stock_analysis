@@ -333,7 +333,9 @@ def test_native_volume_ratio_reconciles_etf_hand_and_share_units() -> None:
         ("midday", 11, 35, True),
         ("midday", 13, 0, False),
         ("close", 14, 0, False),
+        ("close", 15, 0, True),
         ("close", 15, 10, True),
+        ("close", 18, 0, False),
         ("intraday", 10, 15, True),
         ("intraday", 12, 0, False),
     ),
@@ -532,8 +534,8 @@ def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
     expected_mapping = [
         ("37 22 * * 0-4", "premarket"),
-        ("35 3 * * 1-5", "midday"),
-        ("10 7 * * 1-5", "close"),
+        ("53 2 * * 1-5", "midday"),
+        ("23 6 * * 1-5", "close"),
     ]
     scheduled_crons = re.findall(
         r"^\s*- cron: '([^']+)'$", workflow, flags=re.MULTILINE
