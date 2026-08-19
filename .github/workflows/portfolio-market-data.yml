@@ -4,8 +4,9 @@ on:
   schedule:
     # GitHub cron is UTC. Premarket 22:37 Sun-Thu maps to 06:37 Mon-Fri in Shanghai.
     - cron: '37 22 * * 0-4'
-    - cron: '35 3 * * 1-5'
-    - cron: '10 7 * * 1-5'
+    # Midday/close enter the queue early; the phase gate waits for 11:32/15:05 Shanghai.
+    - cron: '53 2 * * 1-5'
+    - cron: '23 6 * * 1-5'
   workflow_dispatch:
     inputs:
       phase:
@@ -29,9 +30,12 @@ permissions:
 jobs:
   generate:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -39,9 +43,6 @@ jobs:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: .github/requirements-portfolio-pipeline.txt
-
-      - name: Install token-free market data dependencies
-        run: pip install -r .github/requirements-portfolio-pipeline.txt
 
       - name: Resolve phase
         id: phase
@@ -54,9 +55,9 @@ jobs:
             phase="$MANUAL_PHASE"
           elif [ "$SCHEDULE_CRON" = "37 22 * * 0-4" ]; then
             phase="premarket"
-          elif [ "$SCHEDULE_CRON" = "35 3 * * 1-5" ]; then
+          elif [ "$SCHEDULE_CRON" = "53 2 * * 1-5" ]; then
             phase="midday"
-          elif [ "$SCHEDULE_CRON" = "10 7 * * 1-5" ]; then
+          elif [ "$SCHEDULE_CRON" = "23 6 * * 1-5" ]; then
             phase="close"
           else
             echo "Unknown trigger: $SCHEDULE_CRON" >&2
@@ -64,17 +65,38 @@ jobs:
           fi
           echo "phase=$phase" >> "$GITHUB_OUTPUT"
 
+      - name: Install token-free market data dependencies
+        run: pip install -r .github/requirements-portfolio-pipeline.txt
+
+      - name: Wait for scheduled market target
+        if: github.event_name == 'schedule'
+        run: python scripts/portfolio_phase_gate.py --phase "${{ steps.phase.outputs.phase }}"
+
       - name: Generate portfolio JSON
         run: python scripts/portfolio_market_data.py --phase "${{ steps.phase.outputs.phase }}"
 
-      - name: Commit updated snapshots
+      - name: Validate generated snapshot contract
+        id: contract
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
         run: |
-          git add -- data/portfolio/*.json 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No portfolio snapshot changes to commit."
+          snapshot="data/portfolio/${PHASE}.json"
+          if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
+            echo "current snapshot unavailable: no new $snapshot was generated"
+            echo "generated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          python scripts/validate_portfolio_snapshot.py --phase "$PHASE" --path "$snapshot"
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit updated snapshots
+        if: steps.contract.outputs.generated == 'true'
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
+        run: |
+          git add -- "data/portfolio/${PHASE}.json"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: update portfolio market data"
-          git push
+          git commit -m "chore: update portfolio ${PHASE} data"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"

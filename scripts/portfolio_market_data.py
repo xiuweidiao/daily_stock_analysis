@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -33,10 +32,14 @@ from scripts.portfolio_config import (
     load_portfolio_config,
     validate_security_code,
 )
+from scripts.portfolio_phase_policy import (
+    PhaseTimeError,
+    SHANGHAI_TZ,
+    validate_phase_time,
+)
 from src.core.trading_calendar import get_effective_trading_date, is_market_open
 
 LOGGER = logging.getLogger("portfolio_market_data")
-SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 TIMEZONE_NAME = "Asia/Shanghai"
 
 BENCHMARKS: Mapping[str, str] = {
@@ -82,10 +85,6 @@ STOCK_FIELDS = (
     "freshness_status",
     "status",
 )
-
-
-class PhaseTimeError(ValueError):
-    """Raised when a snapshot phase does not match the Shanghai market clock."""
 
 
 class DiagnosticOutputError(ValueError):
@@ -237,33 +236,6 @@ def _iso_timestamp(value: Any) -> Optional[str]:
     else:
         parsed = parsed.tz_convert(SHANGHAI_TZ)
     return parsed.isoformat()
-
-
-def _is_intraday_session(now: datetime) -> bool:
-    market_time = now.timetz().replace(tzinfo=None)
-    return (
-        time(9, 30) <= market_time <= time(11, 30)
-        or time(13, 0) <= market_time < time(15, 0)
-    )
-
-
-def validate_phase_time(phase: str, now: datetime) -> None:
-    """Protect every official snapshot with its Shanghai report window."""
-    market_time = now.timetz().replace(tzinfo=None)
-    if phase == "premarket" and not (time(0, 0) <= market_time <= time(8, 50)):
-        raise PhaseTimeError(
-            "premarket snapshot requires Asia/Shanghai time between 00:00 and 08:50"
-        )
-    if phase == "midday" and not (time(11, 30) <= market_time < time(13, 0)):
-        raise PhaseTimeError(
-            "midday snapshot requires Asia/Shanghai time from 11:30 until before 13:00"
-        )
-    if phase == "close" and market_time < time(15, 0):
-        raise PhaseTimeError("close snapshot requires Asia/Shanghai time at or after 15:00")
-    if phase == "intraday" and not _is_intraday_session(now):
-        raise PhaseTimeError(
-            "intraday snapshot requires an A-share session: 09:30-11:30 or 13:00-15:00 Asia/Shanghai"
-        )
 
 
 def _freshness_status(

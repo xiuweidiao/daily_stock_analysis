@@ -11,7 +11,7 @@
 
 - `premarket`：`00:00 <= time <= 08:50`；
 - `midday`：`11:30 <= time < 13:00`；
-- `close`：`time >= 15:00`；
+- `close`：`15:00 <= time < 18:00`；
 - `intraday`：`09:30 <= time <= 11:30` 或 `13:00 <= time < 15:00`。
 
 窗口外执行会返回 `PhaseTimeError`，不会新建或覆盖正式 JSON。采集脚本可在盘中运行，但不会把盘中数据写入 `close.json`。
@@ -93,10 +93,16 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 独立 workflow `.github/workflows/portfolio-market-data.yml` 使用 UTC cron，对应北京时间：
 
 - `22:37 UTC` 周日至周四 = 次日 `06:37 Asia/Shanghai` 周一至周五：premarket（距 `08:50` 窗口上限 133 分钟，为 GitHub scheduled workflow 排队预留时间）
-- `03:35 UTC` = `11:35 Asia/Shanghai`：midday
-- `07:10 UTC` = `15:10 Asia/Shanghai`：close
+- `02:53 UTC` = `10:53 Asia/Shanghai`：midday 提前入队，workflow 在 `11:32` 前启动时会等待，`11:32 <= time < 13:00` 立即生成，`13:00` 后明确失败
+- `06:23 UTC` = `14:23 Asia/Shanghai`：close 提前入队，workflow 在 `15:05` 前启动时会等待，`15:05 <= time < 18:00` 立即生成，`18:00` 后视为当日收盘报告已错过时效窗口并明确失败
 
-`workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。`intraday` 不增加 cron，只能手动运行。生成后 workflow 提交实际变化的 JSON；若交易日判断跳过或内容无变化，则不产生 commit。
+`workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动运行不会等待，直接由 Python 的真实时间窗口保护；`intraday` 不增加 cron。
+
+三个 scheduled phase 共用一个 concurrency group，以避免并发向 `main` 提交产生 push race。三个阶段的等待区间不重叠，因此不会用一个延迟阶段长时间阻塞下一阶段。提交前只 stage 当前 phase 的 JSON，并执行非强制 `git pull --rebase`；如果远端冲突，workflow 失败而不覆盖。
+
+新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、当日 `generated_at`、阶段时间窗口、`data_date`、持仓/关注列表与 `config/portfolio.json` 及 `tracking_type` 都必须一致。配置证券池非空时 `stocks` 不得整体缺失。交易日判断跳过、未生成新文件或契约失败时，日志输出 `current snapshot unavailable`，不会把旧 JSON commit 成当日成功。
+
+下游不应将“文件存在”视为“今日可用”，必须同时校验 `generated_at + data_date + market_phase`。根据当前 GitHub Actions 已观测的延迟与约 4–5 分钟数据生成耗时，建议午盘报告约 `11:45` 读取，收盘报告约 `15:25` 读取；仍需先做上述契约判断，不应假设 Actions 绝对准时。
 
 PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.github/requirements-portfolio-pipeline.txt`，再执行 `pip check` 和 `python scripts/portfolio_market_data.py --help`，用于阻止轻量依赖清单与实际启动 import 链再次漂移。
 
