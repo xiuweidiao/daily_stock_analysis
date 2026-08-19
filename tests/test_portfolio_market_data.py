@@ -353,6 +353,100 @@ def test_688825_volume_units_are_normalized_before_relative_volume_metrics() -> 
     assert stock["volume_vs_5d_avg"] < 2
 
 
+def _volume_without_metadata_payload(
+    *, history_scale: float, realtime_volume: float
+) -> dict:
+    class _NoVolumeMetadataSources(_FakeSources):
+        def history(self, code: str, *, end_date: date, days: int):
+            frame = _history_frame(rows=61, end=end_date.isoformat())
+            frame["volume"] = frame["volume"] * history_scale
+            frame["amount"] = None
+            return frame, "HistoryWithoutVolumeMetadata"
+
+        def quote(self, code: str):
+            quote, _source, errors = super().quote(code)
+            quote.volume = realtime_volume
+            quote.amount = None
+            quote.volume_ratio = None
+            return quote, "RealtimeWithoutVolumeMetadata", errors
+
+    now = datetime(2026, 8, 14, 15, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    return build_payload(
+        "close",
+        sources=_NoVolumeMetadataSources(),
+        portfolio=_portfolio(holdings=("688825",)),
+        now=now,
+    )
+
+
+def test_volume_distribution_reconciles_history_hands_and_realtime_shares() -> None:
+    payload = _volume_without_metadata_payload(
+        history_scale=1.0, realtime_volume=106000
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume"] == 1060
+    assert stock["volume_ratio"] is None
+    assert stock["volume_vs_5d_avg"] == pytest.approx(round(1060 / 1057, 4))
+    assert stock["volume_vs_20d_avg"] == pytest.approx(round(1060 / 1049.5, 4))
+
+
+def test_volume_distribution_reconciles_history_shares_and_realtime_hands() -> None:
+    payload = _volume_without_metadata_payload(
+        history_scale=100.0, realtime_volume=1060
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume"] == 106000
+    assert stock["volume_ratio"] is None
+    assert stock["volume_vs_5d_avg"] == pytest.approx(round(106000 / 105700, 4))
+    assert stock["volume_vs_20d_avg"] == pytest.approx(
+        round(106000 / 104950, 4)
+    )
+
+
+def test_volume_distribution_preserves_matching_units_without_metadata() -> None:
+    payload = _volume_without_metadata_payload(
+        history_scale=1.0, realtime_volume=1060
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume"] == 1060
+    assert stock["volume_vs_5d_avg"] == pytest.approx(round(1060 / 1057, 4))
+    assert stock["volume_vs_20d_avg"] == pytest.approx(round(1060 / 1049.5, 4))
+    assert "suspected volume unit mismatch" not in stock.get("status_detail", "")
+
+
+@pytest.mark.parametrize("spike_multiple", (5, 8, 10))
+def test_volume_distribution_does_not_rescale_real_extreme_volume(
+    spike_multiple: int,
+) -> None:
+    realtime_volume = 1057 * spike_multiple
+    payload = _volume_without_metadata_payload(
+        history_scale=1.0, realtime_volume=realtime_volume
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume"] == realtime_volume
+    assert stock["volume_vs_5d_avg"] == pytest.approx(
+        round(realtime_volume / 1057, 4)
+    )
+
+
+def test_inconclusive_volume_distribution_suppresses_ratios_and_marks_partial() -> None:
+    payload = _volume_without_metadata_payload(
+        history_scale=1.0, realtime_volume=20000
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume"] == 20000
+    assert stock["volume_ratio"] is None
+    assert stock["volume_vs_5d_avg"] is None
+    assert stock["volume_vs_20d_avg"] is None
+    assert stock["status"] == "partial"
+    assert "suspected volume unit mismatch" in stock["status_detail"]
+
+
 @pytest.mark.parametrize(
     ("phase", "hour", "minute", "allowed"),
     (

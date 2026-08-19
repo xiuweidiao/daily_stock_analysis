@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,24 @@ MAX_GENERATION_AGE = timedelta(minutes=30)
 
 class SnapshotContractError(ValueError):
     """Raised when a formal snapshot is stale, mislabeled or has the wrong universe."""
+
+
+CORE_QUOTE_FIELDS = (
+    "latest_price",
+    "prev_close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "amount",
+)
+
+
+def _finite_numeric(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def _parse_generated_at(value: Any) -> datetime:
@@ -116,9 +135,33 @@ def validate_snapshot_contract(
             raise SnapshotContractError(
                 f"stock {stock.get('code')!r} is not usable"
             )
-        if "missing core fields" in str(stock.get("status_detail") or ""):
+        numeric_fields = {}
+        for field in CORE_QUOTE_FIELDS:
+            number = _finite_numeric(stock.get(field))
+            if number is None:
+                raise SnapshotContractError(
+                    f"stock {stock.get('code')!r} field {field} must be a finite number"
+                )
+            numeric_fields[field] = number
+        if numeric_fields["latest_price"] <= 0:
             raise SnapshotContractError(
-                f"stock {stock.get('code')!r} is missing core fields"
+                f"stock {stock.get('code')!r} latest_price must be greater than zero"
+            )
+        if numeric_fields["prev_close"] <= 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} prev_close must be greater than zero"
+            )
+        if numeric_fields["high"] < numeric_fields["low"]:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} high must be greater than or equal to low"
+            )
+        if numeric_fields["volume"] < 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} volume must be non-negative"
+            )
+        if numeric_fields["amount"] < 0:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} amount must be non-negative"
             )
 
     expected_benchmark_codes = {"sh000001", "sh000300", "sz399006", "sh000688"}

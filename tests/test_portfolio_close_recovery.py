@@ -29,6 +29,15 @@ PORTFOLIO = PortfolioConfig(
     watchlist=("600519",),
 )
 BENCHMARK_CODES = ("sh000001", "sh000300", "sz399006", "sh000688")
+CORE_QUOTE = {
+    "latest_price": 10.2,
+    "prev_close": 10.0,
+    "open": 10.1,
+    "high": 10.5,
+    "low": 9.9,
+    "volume": 1000,
+    "amount": 10200,
+}
 
 
 def _close_payload(generated_at: datetime, data_date: date) -> dict:
@@ -41,9 +50,24 @@ def _close_payload(generated_at: datetime, data_date: date) -> dict:
         "holdings_codes": list(PORTFOLIO.holdings),
         "watchlist_codes": list(PORTFOLIO.watchlist),
         "stocks": [
-            {"code": "688825", "tracking_type": "holding", "status": "partial"},
-            {"code": "159567", "tracking_type": "holding", "status": "ok"},
-            {"code": "600519", "tracking_type": "watchlist", "status": "ok"},
+            {
+                "code": "688825",
+                "tracking_type": "holding",
+                "status": "partial",
+                **CORE_QUOTE,
+            },
+            {
+                "code": "159567",
+                "tracking_type": "holding",
+                "status": "ok",
+                **CORE_QUOTE,
+            },
+            {
+                "code": "600519",
+                "tracking_type": "watchlist",
+                "status": "ok",
+                **CORE_QUOTE,
+            },
         ],
         "benchmarks": [
             {"code": code, "status": "ok"} for code in BENCHMARK_CODES
@@ -173,6 +197,26 @@ def test_today_close_with_wrong_contract_is_regenerated(tmp_path: Path) -> None:
 
     assert result.status == TODAY_CLOSE_INVALID
     assert result.should_generate is True
+
+
+def test_today_close_with_null_core_quote_is_invalid_and_regenerated(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "close.json"
+    payload = _close_payload(
+        datetime(2026, 8, 19, 15, 5, tzinfo=SHANGHAI),
+        date(2026, 8, 19),
+    )
+    payload["stocks"][0]["latest_price"] = None
+    _write(path, payload)
+
+    result = _inspect(
+        path, datetime(2026, 8, 19, 15, 43, tzinfo=SHANGHAI)
+    )
+
+    assert result.status == TODAY_CLOSE_INVALID
+    assert result.should_generate is True
+    assert "latest_price must be a finite number" in result.reason
 
 
 def test_non_trading_day_skips_without_creating_snapshot(tmp_path: Path) -> None:
