@@ -343,11 +343,44 @@ def calculate_metrics(frame: pd.DataFrame) -> MetricResult:
     return MetricResult(values=values, has_60_day_ma=len(close) >= 60, has_60_day_return=len(close) >= 61)
 
 
+def _normalize_history_volume(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize daily volume to shares when a source reports exchange lots."""
+    bars = frame.copy()
+    if not {"volume", "amount", "close"}.issubset(bars.columns):
+        return bars
+    volume = pd.to_numeric(bars["volume"], errors="coerce")
+    amount = pd.to_numeric(bars["amount"], errors="coerce")
+    close = pd.to_numeric(bars["close"], errors="coerce")
+    valid = (volume > 0) & (amount > 0) & (close > 0)
+    implied_multiplier = (amount[valid] / (volume[valid] * close[valid])).replace(
+        [math.inf, -math.inf], math.nan
+    ).dropna()
+    if implied_multiplier.empty:
+        return bars
+    median_multiplier = float(implied_multiplier.median())
+    if 20 <= median_multiplier <= 500:
+        bars["volume"] = volume * 100
+    return bars
+
+
+def _quote_volume_in_shares(quote: Any) -> Optional[float]:
+    """Use quote amount and price to distinguish shares from 100-share lots."""
+    raw_volume = _finite_number(getattr(quote, "volume", None))
+    amount = _finite_number(getattr(quote, "amount", None))
+    price = _finite_number(getattr(quote, "price", None))
+    if raw_volume is None or raw_volume <= 0:
+        return raw_volume
+    if amount is None or amount <= 0 or price is None or price <= 0:
+        return raw_volume
+    implied_multiplier = amount / (raw_volume * price)
+    return raw_volume * 100 if 20 <= implied_multiplier <= 500 else raw_volume
+
+
 def _reconciled_quote_volume(
     frame: pd.DataFrame, quote: Any, target_date: date
 ) -> Optional[float]:
     """Reconcile hand/share quote units when a native volume ratio can anchor them."""
-    raw_volume = _finite_number(getattr(quote, "volume", None))
+    raw_volume = _quote_volume_in_shares(quote)
     native_ratio = _finite_number(getattr(quote, "volume_ratio", None))
     if raw_volume is None or raw_volume <= 0 or native_ratio is None or native_ratio <= 0:
         return raw_volume
@@ -440,6 +473,7 @@ def build_stock_item(
     except Exception as exc:
         errors.append({"scope": "stock", "code": code, "stage": "history", "message": str(exc)})
         return item, errors
+    history = _normalize_history_volume(history)
 
     quote, quote_source, quote_errors = sources.quote(code)
     realtime_used = phase != "premarket" and quote is not None

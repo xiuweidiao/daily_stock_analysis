@@ -75,6 +75,18 @@ def test_workflow_crons_convert_to_intended_shanghai_queue_times() -> None:
             datetime(2026, 8, 17, 6, 23, tzinfo=utc),
             datetime(2026, 8, 17, 14, 23, tzinfo=SHANGHAI),
         ),
+        (
+            datetime(2026, 8, 17, 7, 43, tzinfo=utc),
+            datetime(2026, 8, 17, 15, 43, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 17, 8, 43, tzinfo=utc),
+            datetime(2026, 8, 17, 16, 43, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 17, 9, 3, tzinfo=utc),
+            datetime(2026, 8, 17, 17, 3, tzinfo=SHANGHAI),
+        ),
     )
 
     for utc_time, shanghai_time in conversions:
@@ -93,10 +105,15 @@ def _payload(phase: str, generated_at: datetime, data_date: date) -> dict:
         "holdings_codes": ["159567"],
         "watchlist_codes": ["600519"],
         "stocks": [
-            {"code": "159567", "tracking_type": "holding"},
-            {"code": "600519", "tracking_type": "watchlist"},
+            {"code": "159567", "tracking_type": "holding", "status": "ok"},
+            {"code": "600519", "tracking_type": "watchlist", "status": "ok"},
         ],
-        "benchmarks": [],
+        "benchmarks": [
+            {"code": "sh000001", "status": "ok"},
+            {"code": "sh000300", "status": "ok"},
+            {"code": "sz399006", "status": "ok"},
+            {"code": "sh000688", "status": "ok"},
+        ],
         "errors": [],
     }
 
@@ -185,6 +202,9 @@ def test_workflow_waits_then_validates_before_phase_scoped_commit() -> None:
         encoding="utf-8"
     )
 
+    assert workflow.index("Check whether today's close is already ready") < workflow.index(
+        "Wait for scheduled market target"
+    )
     assert workflow.index("Wait for scheduled market target") < workflow.index(
         "Generate portfolio JSON"
     )

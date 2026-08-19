@@ -320,6 +320,39 @@ def test_native_volume_ratio_reconciles_etf_hand_and_share_units() -> None:
     assert stock["volume_vs_5d_avg"] == pytest.approx(round(1000 / 1077, 4))
 
 
+def test_688825_volume_units_are_normalized_before_relative_volume_metrics() -> None:
+    class _ChangxinMixedVolumeSources(_FakeSources):
+        def history(self, code: str, *, end_date: date, days: int):
+            assert code == "688825"
+            frame = _history_frame(rows=61, end=end_date.isoformat())
+            share_volume = frame["volume"].copy()
+            frame["volume"] = share_volume / 100
+            frame["amount"] = share_volume * frame["close"]
+            return frame, "EfinanceFetcher"
+
+        def quote(self, code: str):
+            quote, _source, errors = super().quote(code)
+            quote.volume = 1100
+            quote.amount = quote.volume * quote.price
+            quote.volume_ratio = None
+            return quote, "akshare_sina", errors
+
+    now = datetime(2026, 8, 14, 15, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    payload = build_payload(
+        "close",
+        sources=_ChangxinMixedVolumeSources(),
+        portfolio=_portfolio(holdings=("688825",)),
+        now=now,
+    )
+
+    stock = payload["stocks"][0]
+    assert stock["volume"] == 1100
+    assert stock["volume_ratio"] is None
+    assert stock["volume_vs_5d_avg"] == pytest.approx(round(1100 / 1057, 4))
+    assert stock["volume_vs_20d_avg"] == pytest.approx(round(1100 / 1049.5, 4))
+    assert stock["volume_vs_5d_avg"] < 2
+
+
 @pytest.mark.parametrize(
     ("phase", "hour", "minute", "allowed"),
     (
@@ -536,6 +569,9 @@ def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
         ("37 22 * * 0-4", "premarket"),
         ("53 2 * * 1-5", "midday"),
         ("23 6 * * 1-5", "close"),
+        ("43 7 * * 1-5", "close"),
+        ("43 8 * * 1-5", "close"),
+        ("3 9 * * 1-5", "close"),
     ]
     scheduled_crons = re.findall(
         r"^\s*- cron: '([^']+)'$", workflow, flags=re.MULTILINE
@@ -588,6 +624,8 @@ def test_portfolio_dependency_smoke_uses_only_lightweight_python311_requirements
     )
     assert "python -m pip check" in workflow
     assert "python scripts/portfolio_market_data.py --help" in workflow
+    assert "python scripts/portfolio_close_readiness.py --help" in workflow
+    assert "python scripts/validate_portfolio_snapshot.py --help" in workflow
     assert "requirements.txt" not in workflow.replace(
         ".github/requirements-portfolio-pipeline.txt", ""
     )

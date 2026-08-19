@@ -50,6 +50,7 @@ def validate_snapshot_contract(
     phase: str,
     portfolio: PortfolioConfig,
     now: datetime | None = None,
+    max_generation_age: timedelta | None = MAX_GENERATION_AGE,
 ) -> None:
     """Validate phase, clock, trading date and configured security classification."""
     if phase not in PHASES:
@@ -64,7 +65,9 @@ def validate_snapshot_contract(
     if generated_at.date() != current.date():
         raise SnapshotContractError("current snapshot unavailable: generated_at is not today")
     generation_age = current - generated_at
-    if generation_age < -timedelta(minutes=1) or generation_age > MAX_GENERATION_AGE:
+    if generation_age < -timedelta(minutes=1):
+        raise SnapshotContractError("generated_at cannot be in the future")
+    if max_generation_age is not None and generation_age > max_generation_age:
         raise SnapshotContractError(
             "current snapshot unavailable: generated_at is not from this workflow execution"
         )
@@ -97,6 +100,8 @@ def validate_snapshot_contract(
         raise SnapshotContractError("benchmarks must be an array")
     if not isinstance(errors, list):
         raise SnapshotContractError("errors must be an array")
+    if errors:
+        raise SnapshotContractError("snapshot contains unresolved data errors")
 
     expected_tracking = list(portfolio.tracked_securities())
     actual_tracking = []
@@ -106,6 +111,29 @@ def validate_snapshot_contract(
         actual_tracking.append((stock.get("code"), stock.get("tracking_type")))
     if actual_tracking != expected_tracking:
         raise SnapshotContractError("stocks code/tracking_type does not match portfolio config")
+    for stock in stocks:
+        if stock.get("status") not in {"ok", "partial"}:
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} is not usable"
+            )
+        if "missing core fields" in str(stock.get("status_detail") or ""):
+            raise SnapshotContractError(
+                f"stock {stock.get('code')!r} is missing core fields"
+            )
+
+    expected_benchmark_codes = {"sh000001", "sh000300", "sz399006", "sh000688"}
+    actual_benchmark_codes = set()
+    for benchmark in benchmarks:
+        if not isinstance(benchmark, Mapping):
+            raise SnapshotContractError("each benchmarks item must be an object")
+        actual_benchmark_codes.add(benchmark.get("code"))
+        if benchmark.get("status") != "ok":
+            raise SnapshotContractError(
+                f"benchmark {benchmark.get('code')!r} is not usable"
+            )
+    if actual_benchmark_codes != expected_benchmark_codes:
+        raise SnapshotContractError("benchmarks must contain the four required indexes")
+
     expected_status = "ok" if expected_tracking else "empty"
     if payload.get("portfolio_status") != expected_status:
         raise SnapshotContractError(f"portfolio_status must be {expected_status}")
