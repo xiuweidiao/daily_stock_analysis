@@ -110,6 +110,26 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 
 下游不应将“文件存在”视为“今日可用”，必须同时校验 `generated_at + data_date + market_phase`。根据当前 GitHub Actions 已观测的延迟与约 4–5 分钟数据生成耗时，建议午盘报告约 `11:45` 读取，收盘报告约 `15:25` 读取；仍需先做上述契约判断，不应假设 Actions 绝对准时。
 
+### 消费前 readiness 检查
+
+外部 GPT/Agent 应先刷新或重新读取 GitHub `main`，再对对应正式文件执行只读检查：
+
+```bash
+python scripts/check_portfolio_snapshot_ready.py --phase premarket
+python scripts/check_portfolio_snapshot_ready.py --phase midday
+python scripts/check_portfolio_snapshot_ready.py --phase close
+```
+
+脚本只读取 `data/portfolio/{phase}.json` 和 `config/portfolio.json`，不会抓取行情、修改或删除 snapshot，也不会创建另一套行情管道。`ready=true` 仅在文件存在，阶段、时区、当日 `generated_at`、phase 时间窗口、预期 `data_date`、配置证券池和完整正式 snapshot contract 全部通过时返回。消费者以 JSON 中的 `ready` 为判断依据；昨日文件返回 `stale_snapshot`，文件不存在返回 `missing_snapshot`，其余契约错误统一返回 `invalid_snapshot`。旧文件不会被删除或冒充当日数据。
+
+推荐读取与重试策略：
+
+- premarket：08:00 后开始读取；未 ready 时每 5 分钟重试，最晚到 08:50；
+- midday：建议 11:45 开始读取；未 ready 时每 5 分钟重试，最晚到 12:15；
+- close：建议 15:25 开始读取；未 ready 时每 5 分钟重试，最晚到 16:00。
+
+readiness 检查复用正式 validator，但不使用“生成后 30 分钟内”这一 commit 阶段限制，因此合法 midday 快照在 12:15 仍可判定 ready；日期、阶段窗口、证券池、核心行情字段和基准契约不会放宽。该机制解决消费者在 JSON 尚未 push 到 main 时的短暂可见性竞态，不要求修改生产 workflow。
+
 PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.github/requirements-portfolio-pipeline.txt`，再执行 `pip check` 和 `python scripts/portfolio_market_data.py --help`，用于阻止轻量依赖清单与实际启动 import 链再次漂移。
 
 ## JSON 时间与量比示例
