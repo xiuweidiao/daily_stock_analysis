@@ -35,5 +35,6 @@ jobs:
         run: |
           python -m pip check
           python scripts/portfolio_market_data.py --help
+          python scripts/portfolio_premarket_readiness.py --help
           python scripts/portfolio_close_readiness.py --help
           python scripts/validate_portfolio_snapshot.py --help

@@ -250,7 +250,11 @@ def test_workflow_keeps_global_concurrency_and_emits_close_states() -> None:
 
     assert "group: portfolio-market-data-${{ github.ref }}" in workflow
     assert "cancel-in-progress: false" in workflow
-    assert "steps.close_readiness.outputs.should_generate == 'true'" in workflow
+    assert (
+        "CLOSE_SHOULD_GENERATE: "
+        "${{ steps.close_readiness.outputs.should_generate }}"
+    ) in workflow
+    assert "if: steps.decision.outputs.should_generate == 'true'" in workflow
     assert "if: steps.contract.outputs.generated == 'true'" in workflow
     for status in (
         "TODAY_CLOSE_GENERATED",

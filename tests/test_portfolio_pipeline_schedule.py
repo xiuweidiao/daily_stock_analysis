@@ -77,6 +77,14 @@ def test_workflow_crons_convert_to_intended_shanghai_queue_times() -> None:
             datetime(2026, 8, 17, 6, 37, tzinfo=SHANGHAI),
         ),
         (
+            datetime(2026, 8, 16, 23, 7, tzinfo=utc),
+            datetime(2026, 8, 17, 7, 7, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 16, 23, 37, tzinfo=utc),
+            datetime(2026, 8, 17, 7, 37, tzinfo=SHANGHAI),
+        ),
+        (
             datetime(2026, 8, 17, 2, 53, tzinfo=utc),
             datetime(2026, 8, 17, 10, 53, tzinfo=SHANGHAI),
         ),

@@ -93,18 +93,22 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 
 独立 workflow `.github/workflows/portfolio-market-data.yml` 使用 UTC cron，对应北京时间：
 
-- `22:37 UTC` 周日至周四 = 次日 `06:37 Asia/Shanghai` 周一至周五：premarket（距 `08:50` 窗口上限 133 分钟，为 GitHub scheduled workflow 排队预留时间）
+- `22:37 / 23:07 / 23:37 UTC` 周日至周四 = 次日 `06:37 / 07:07 / 07:37 Asia/Shanghai` 周一至周五：premarket 主任务与两次独立补偿（均在 `08:50` 窗口内）
 - `02:53 UTC` = `10:53 Asia/Shanghai`：midday 提前入队，workflow 在 `11:32` 前启动时会等待，`11:32 <= time < 13:00` 立即生成，`13:00` 后明确失败
 - `06:23 UTC` = `14:23 Asia/Shanghai`：close 主任务，在 `15:05` 前启动时等待至 `15:05`
 - `07:43 / 08:43 / 09:03 UTC` = `15:43 / 16:43 / 17:03 Asia/Shanghai`：close 三次自动补偿
 
 四个 close cron 共用同一套 workflow 逻辑。每次采集前先对已有 `close.json` 执行不受“生成后 30 分钟”限制的当日静态契约检查；今日快照已合法时输出 `TODAY_CLOSE_ALREADY_READY` 并不再采集、不改 `generated_at`、不提交。文件缺失或仍是上一交易日时输出 `TODAY_CLOSE_MISSING`；当日文件存在但契约错误时输出 `TODAY_CLOSE_INVALID`，两者才允许补偿生成。
 
+premarket 的三个 cron 也共用一套 workflow 逻辑。每次开始先读取 `premarket.json`，复用正式 snapshot validator 检查阶段、时区、当日 `generated_at`、最近已完成交易日 `data_date`、证券池、核心行情字段及基准契约。已合法时输出 `PREMARKET_FRESH=true` / `reason=already_fresh`，跳过行情抓取、validator 和 commit；缺失、旧日期或无效文件才生成。生成器失败、新文件仍不通过契约，或生成后 `git diff` 仍为空，workflow 都明确失败，不会把昨日文件标成当日成功。
+
 新生成的快照仍必须通过“本次执行 30 分钟内”的严格 validator：顶层不得有未解决 `errors`；每只持仓/关注证券的 `latest_price`、`prev_close`、`open`、`high`、`low`、`volume`、`amount` 必须为有限数值，并满足正价格、`high >= low`、成交量/成交额非负。历史不足导致技术指标为 `null` 仍允许以 `partial` 通过，这与今日核心行情缺失是两个不同契约。四个基准必须全部为 `ok`。只有 push 成功后才输出 `TODAY_CLOSE_GENERATED`；采集、契约或 push 失败分别输出 `CLOSE_GENERATION_FAILED`、`SNAPSHOT_CONTRACT_FAILED`、`PUSH_FAILED`。非交易日输出 `NON_TRADING_DAY_SKIP` 并不进入等待/采集。`18:00` 后若当日 close 仍缺失，phase gate 明确失败，不生成正式文件。
 
 `workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动运行不会等待，直接由 Python 的真实时间窗口保护；`intraday` 不增加 cron。
 
 所有 scheduled run 仍共用一个 concurrency group，以避免并发向 `main` 产生 push race。延迟的 primary 会先完成提交，排队中的 retry 随后重新 checkout 并看到已合法的当日文件，因此幂等退出。提交前只 stage 当前 phase 的 JSON，并执行非强制 `git pull --rebase`；如果远端冲突，workflow 失败而不覆盖。
+
+每次 workflow 都在 Step Summary 记录北京时间、事件、cron、解析 phase、当前 snapshot 元数据、预期交易日、freshness 原因，以及 generator / validator / git diff / commit 结果。这可以区分“GitHub 未创建 run”、“run 触发但快照已新鲜”、“生成失败”、“契约失败”和“push 失败”。
 
 新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、当日 `generated_at`、阶段时间窗口、`data_date`、持仓/关注列表与 `config/portfolio.json` 及 `tracking_type` 都必须一致。配置证券池非空时 `stocks` 不得整体缺失。交易日判断跳过、未生成新文件或契约失败时，日志输出 `current snapshot unavailable`，不会把旧 JSON commit 成当日成功。
 

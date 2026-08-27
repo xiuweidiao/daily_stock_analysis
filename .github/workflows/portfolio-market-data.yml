@@ -2,8 +2,10 @@ name: Portfolio Market Data
 
 on:
   schedule:
-    # GitHub cron is UTC. Premarket 22:37 Sun-Thu maps to 06:37 Mon-Fri in Shanghai.
+    # GitHub cron is UTC. Three independent premarket schedules compensate for a dropped run.
     - cron: '37 22 * * 0-4'
+    - cron: '07 23 * * 0-4'
+    - cron: '37 23 * * 0-4'
     # Midday/close enter the queue early; close retries compensate for missed/failed runs.
     - cron: '53 2 * * 1-5'
     - cron: '23 6 * * 1-5'
@@ -56,7 +58,9 @@ jobs:
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             phase="$MANUAL_PHASE"
-          elif [ "$SCHEDULE_CRON" = "37 22 * * 0-4" ]; then
+          elif [ "$SCHEDULE_CRON" = "37 22 * * 0-4" ] ||
+               [ "$SCHEDULE_CRON" = "07 23 * * 0-4" ] ||
+               [ "$SCHEDULE_CRON" = "37 23 * * 0-4" ]; then
             phase="premarket"
           elif [ "$SCHEDULE_CRON" = "53 2 * * 1-5" ]; then
             phase="midday"
@@ -77,16 +81,40 @@ jobs:
       - name: Install token-free market data dependencies
         run: pip install -r .github/requirements-portfolio-pipeline.txt
 
+      - name: Check whether today's premarket is already ready
+        id: premarket_readiness
+        if: steps.phase.outputs.phase == 'premarket'
+        run: python scripts/portfolio_premarket_readiness.py
+
       - name: Check whether today's close is already ready
         id: close_readiness
         if: steps.phase.outputs.phase == 'close'
         run: python scripts/portfolio_close_readiness.py
 
+      - name: Decide whether generation is required
+        id: decision
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
+          PREMARKET_SHOULD_GENERATE: ${{ steps.premarket_readiness.outputs.should_generate }}
+          CLOSE_SHOULD_GENERATE: ${{ steps.close_readiness.outputs.should_generate }}
+        run: |
+          if [ "$PHASE" = "premarket" ]; then
+            should_generate="$PREMARKET_SHOULD_GENERATE"
+          elif [ "$PHASE" = "close" ]; then
+            should_generate="$CLOSE_SHOULD_GENERATE"
+          else
+            should_generate="true"
+          fi
+          if [ "$should_generate" != "true" ] && [ "$should_generate" != "false" ]; then
+            echo "Invalid generation decision for $PHASE: $should_generate" >&2
+            exit 1
+          fi
+          echo "should_generate=$should_generate" >> "$GITHUB_OUTPUT"
+
       - name: Wait for scheduled market target
         if: >-
           github.event_name == 'schedule' &&
-          (steps.phase.outputs.phase != 'close' ||
-          steps.close_readiness.outputs.should_generate == 'true')
+          steps.decision.outputs.should_generate == 'true'
         env:
           PHASE: ${{ steps.phase.outputs.phase }}
         run: |
@@ -96,22 +124,23 @@ jobs:
           fi
 
       - name: Generate portfolio JSON
-        if: >-
-          steps.phase.outputs.phase != 'close' ||
-          steps.close_readiness.outputs.should_generate == 'true'
+        id: generator
+        if: steps.decision.outputs.should_generate == 'true'
         env:
           PHASE: ${{ steps.phase.outputs.phase }}
         run: |
+          echo "attempted=true" >> "$GITHUB_OUTPUT"
           if ! python scripts/portfolio_market_data.py --phase "$PHASE"; then
             if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; fi
+            if [ "$PHASE" = "premarket" ]; then echo "PREMARKET_GENERATION_FAILED"; fi
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+          echo "result=run" >> "$GITHUB_OUTPUT"
 
       - name: Validate generated snapshot contract
         id: contract
-        if: >-
-          steps.phase.outputs.phase != 'close' ||
-          steps.close_readiness.outputs.should_generate == 'true'
+        if: steps.decision.outputs.should_generate == 'true'
         env:
           PHASE: ${{ steps.phase.outputs.phase }}
         run: |
@@ -119,16 +148,24 @@ jobs:
           if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
             echo "current snapshot unavailable: no new $snapshot was generated"
             echo "generated=false" >> "$GITHUB_OUTPUT"
+            echo "git_diff=unchanged" >> "$GITHUB_OUTPUT"
+            echo "validator=fail" >> "$GITHUB_OUTPUT"
             if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; exit 1; fi
+            if [ "$PHASE" = "premarket" ]; then echo "PREMARKET_GENERATION_FAILED"; exit 1; fi
             exit 0
           fi
+          echo "git_diff=changed" >> "$GITHUB_OUTPUT"
           if ! python scripts/validate_portfolio_snapshot.py --phase "$PHASE" --path "$snapshot"; then
             if [ "$PHASE" = "close" ]; then echo "SNAPSHOT_CONTRACT_FAILED"; fi
+            if [ "$PHASE" = "premarket" ]; then echo "PREMARKET_CONTRACT_FAILED"; fi
+            echo "validator=fail" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "generated=true" >> "$GITHUB_OUTPUT"
+          echo "validator=pass" >> "$GITHUB_OUTPUT"
 
       - name: Commit updated snapshots
+        id: commit
         if: steps.contract.outputs.generated == 'true'
         env:
           PHASE: ${{ steps.phase.outputs.phase }}
@@ -138,14 +175,136 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git commit -m "chore: update portfolio ${PHASE} data"; then
             if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           if ! git pull --rebase origin "$GITHUB_REF_NAME"; then
             if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           if ! git push origin "HEAD:$GITHUB_REF_NAME"; then
             if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+          echo "result=committed" >> "$GITHUB_OUTPUT"
           if [ "$PHASE" = "close" ]; then echo "TODAY_CLOSE_GENERATED"; fi
+
+      - name: Write workflow summary
+        if: always()
+        env:
+          PHASE: ${{ steps.phase.outputs.phase }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
+          PREMARKET_FRESHNESS: ${{ steps.premarket_readiness.outputs.freshness }}
+          PREMARKET_REASON: ${{ steps.premarket_readiness.outputs.reason }}
+          PREMARKET_TODAY_CN: ${{ steps.premarket_readiness.outputs.today_cn }}
+          PREMARKET_EXPECTED_DATE: ${{ steps.premarket_readiness.outputs.latest_completed_trading_day }}
+          CLOSE_STATUS: ${{ steps.close_readiness.outputs.status }}
+          GENERATOR_OUTCOME: ${{ steps.generator.outcome }}
+          VALIDATOR_OUTCOME: ${{ steps.contract.outcome }}
+          VALIDATOR_RESULT: ${{ steps.contract.outputs.validator }}
+          GIT_DIFF_RESULT: ${{ steps.contract.outputs.git_diff }}
+          SNAPSHOT_GENERATED: ${{ steps.contract.outputs.generated }}
+          COMMIT_OUTCOME: ${{ steps.commit.outcome }}
+          COMMIT_RESULT: ${{ steps.commit.outputs.result }}
+        run: |
+          snapshot="data/portfolio/${PHASE}.json"
+          beijing_time="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %z')"
+          today_cn="${PREMARKET_TODAY_CN:-$(TZ=Asia/Shanghai date +%F)}"
+          schedule_expression="${SCHEDULE_CRON:-manual}"
+
+          generated_at="unavailable"
+          data_date="unavailable"
+          market_phase="unavailable"
+          portfolio_status="unavailable"
+          if jq -e 'type == "object"' "$snapshot" >/dev/null 2>&1; then
+            generated_at="$(jq -r '.generated_at // "unavailable"' "$snapshot")"
+            data_date="$(jq -r '.data_date // "unavailable"' "$snapshot")"
+            market_phase="$(jq -r '.market_phase // "unavailable"' "$snapshot")"
+            portfolio_status="$(jq -r '.portfolio_status // "unavailable"' "$snapshot")"
+          fi
+
+          latest_completed="${PREMARKET_EXPECTED_DATE:-unavailable}"
+          if [ "$latest_completed" = "unavailable" ]; then
+            latest_completed="$(python -c 'from datetime import datetime; from scripts.portfolio_market_data import _phase_data_date; from scripts.portfolio_phase_policy import SHANGHAI_TZ; print(_phase_data_date("premarket", datetime.now(SHANGHAI_TZ)))' 2>/dev/null || echo unavailable)"
+          fi
+
+          freshness="${PREMARKET_FRESHNESS:-unknown}"
+          freshness_reason="${PREMARKET_REASON:-not_checked_before_generation}"
+          if [ "$SNAPSHOT_GENERATED" = "true" ]; then
+            freshness="fresh"
+            freshness_reason="generated_and_validated"
+          elif [ "$PHASE" = "close" ]; then
+            case "$CLOSE_STATUS" in
+              TODAY_CLOSE_ALREADY_READY)
+                freshness="fresh"
+                freshness_reason="already_fresh"
+                ;;
+              TODAY_CLOSE_INVALID)
+                freshness="invalid"
+                freshness_reason="$CLOSE_STATUS"
+                ;;
+              *)
+                freshness="stale"
+                freshness_reason="${CLOSE_STATUS:-no_valid_snapshot_generated}"
+                ;;
+            esac
+          elif [ "$VALIDATOR_OUTCOME" = "failure" ]; then
+            freshness="invalid"
+            freshness_reason="snapshot_contract_failed"
+          elif [ "$freshness" = "unknown" ]; then
+            freshness="stale"
+            freshness_reason="no_valid_snapshot_generated"
+          fi
+
+          case "$GENERATOR_OUTCOME" in
+            success) generator_result="run" ;;
+            failure) generator_result="failed" ;;
+            *) generator_result="skipped" ;;
+          esac
+          if [ "$VALIDATOR_RESULT" = "pass" ]; then
+            validator_result="pass"
+          elif [ "$VALIDATOR_OUTCOME" = "failure" ]; then
+            validator_result="fail"
+          else
+            validator_result="skipped"
+          fi
+          git_diff_result="${GIT_DIFF_RESULT:-unchanged}"
+          if [ "$COMMIT_RESULT" = "committed" ]; then
+            commit_result="committed"
+          elif [ "$COMMIT_OUTCOME" = "failure" ]; then
+            commit_result="failed"
+          else
+            commit_result="no-op"
+          fi
+
+          {
+            echo "## Portfolio Market Data"
+            echo
+            echo "Beijing time: $beijing_time"
+            echo "Event: $EVENT_NAME"
+            echo "Schedule expression: $schedule_expression"
+            echo "Resolved phase: ${PHASE:-unknown}"
+            echo
+            echo "Current snapshot:"
+            echo "- generated_at: $generated_at"
+            echo "- data_date: $data_date"
+            echo "- market_phase: $market_phase"
+            echo "- portfolio_status: $portfolio_status"
+            echo
+            echo "Expected:"
+            echo "- today_cn: $today_cn"
+            echo "- latest_completed_trading_day: $latest_completed"
+            echo
+            echo "Freshness:"
+            echo "- $freshness"
+            echo "- reason: $freshness_reason"
+            echo
+            echo "Execution:"
+            echo "- generator: $generator_result"
+            echo "- validator: $validator_result"
+            echo "- git diff: $git_diff_result"
+            echo "- commit: $commit_result"
+          } >> "$GITHUB_STEP_SUMMARY"
