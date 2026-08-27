@@ -661,6 +661,8 @@ def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
     expected_mapping = [
         ("37 22 * * 0-4", "premarket"),
+        ("07 23 * * 0-4", "premarket"),
+        ("37 23 * * 0-4", "premarket"),
         ("53 2 * * 1-5", "midday"),
         ("23 6 * * 1-5", "close"),
         ("43 7 * * 1-5", "close"),
@@ -670,13 +672,22 @@ def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
     scheduled_crons = re.findall(
         r"^\s*- cron: '([^']+)'$", workflow, flags=re.MULTILINE
     )
-    resolve_mapping = re.findall(
+    premarket_mapping = re.search(
+        r'elif \[ "\$SCHEDULE_CRON" = "37 22 \* \* 0-4" \].*?'
+        r'\[ "\$SCHEDULE_CRON" = "07 23 \* \* 0-4" \].*?'
+        r'\[ "\$SCHEDULE_CRON" = "37 23 \* \* 0-4" \]; then\n'
+        r'\s+phase="premarket"',
+        workflow,
+        flags=re.DOTALL,
+    )
+    individual_mapping = re.findall(
         r'elif \[ "\$SCHEDULE_CRON" = "([^"]+)" \]; then\n\s+phase="([^"]+)"',
         workflow,
     )
 
     assert scheduled_crons == [cron for cron, _phase in expected_mapping]
-    assert resolve_mapping == expected_mapping
+    assert premarket_mapping is not None
+    assert individual_mapping == expected_mapping[3:]
 
 
 def test_premarket_cron_maps_utc_sunday_to_shanghai_monday() -> None:
@@ -718,6 +729,7 @@ def test_portfolio_dependency_smoke_uses_only_lightweight_python311_requirements
     )
     assert "python -m pip check" in workflow
     assert "python scripts/portfolio_market_data.py --help" in workflow
+    assert "python scripts/portfolio_premarket_readiness.py --help" in workflow
     assert "python scripts/portfolio_close_readiness.py --help" in workflow
     assert "python scripts/validate_portfolio_snapshot.py --help" in workflow
     assert "requirements.txt" not in workflow.replace(
