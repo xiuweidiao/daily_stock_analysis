@@ -256,7 +256,9 @@ def test_generated_stale_snapshot_fails_formal_validator() -> None:
     generated_at = datetime(2026, 8, 26, 7, 7, tzinfo=SHANGHAI)
     payload = _premarket_payload(generated_at, date(2026, 8, 25))
 
-    with pytest.raises(SnapshotContractError, match="generated_at is not today"):
+    with pytest.raises(
+        SnapshotContractError, match="generated_at is not the target date"
+    ):
         validate_snapshot_contract(
             payload,
             phase="premarket",
@@ -285,7 +287,7 @@ def test_workflow_generator_failure_is_a_red_failure(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert "PREMARKET_GENERATION_FAILED" in result.stdout
+    assert "GENERATION_FAILED" in result.stdout
     assert "result=failed\n" in github_output.read_text(encoding="utf-8")
 
 
@@ -311,7 +313,7 @@ def test_workflow_unchanged_stale_output_is_a_red_failure(tmp_path: Path) -> Non
     )
 
     assert result.returncode == 1
-    assert "PREMARKET_GENERATION_FAILED" in result.stdout
+    assert "SNAPSHOT_NOT_UPDATED" in result.stdout
     output = github_output.read_text(encoding="utf-8")
     assert "generated=false\n" in output
     assert "git_diff=unchanged\n" in output
@@ -323,22 +325,22 @@ def test_workflow_serializes_delayed_primary_and_fallback() -> None:
         encoding="utf-8"
     )
 
-    assert "group: portfolio-market-data-${{ github.ref }}" in workflow
-    assert "cancel-in-progress: false" in workflow
     assert (
-        "PREMARKET_SHOULD_GENERATE: "
-        "${{ steps.premarket_readiness.outputs.should_generate }}"
+        "group: portfolio-market-data-${{ github.ref }}-"
+        "${{ needs.resolve_phase.outputs.phase }}"
     ) in workflow
-    assert "if: steps.decision.outputs.should_generate == 'true'" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "steps.readiness.outputs.should_generate" in workflow
+    assert "steps.decision.outputs.should_generate == 'true'" in workflow
     assert "git pull --rebase origin" in workflow
     for summary_field in (
-        "Beijing time:",
+        "job start Beijing time:",
         "Event:",
         "Schedule expression:",
         "Resolved phase:",
         "Current snapshot:",
-        "latest_completed_trading_day:",
-        "Freshness:",
+        "expected data_date:",
+        "Readiness:",
         "generator:",
         "validator:",
         "git diff:",

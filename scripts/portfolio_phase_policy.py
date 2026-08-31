@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 
@@ -30,6 +30,7 @@ class PhaseWaitPlan:
     target: datetime | None
     cutoff: datetime
     wait_seconds: int
+    generation_mode: str = "live"
 
 
 def as_shanghai_time(value: datetime) -> datetime:
@@ -68,32 +69,52 @@ def validate_phase_time(phase: str, now: datetime) -> None:
         )
 
 
-def plan_scheduled_phase(phase: str, now: datetime) -> PhaseWaitPlan:
+def plan_scheduled_phase(
+    phase: str,
+    now: datetime,
+    *,
+    target_date: date | None = None,
+    expected_data_date: date | None = None,
+    generation_mode: str = "live",
+) -> PhaseWaitPlan:
     """Return the scheduled workflow wait without changing or faking the clock."""
     current = as_shanghai_time(now)
-    current_time = current.timetz().replace(tzinfo=None)
+    business_date = target_date or current.date()
     if phase == "premarket":
-        cutoff = datetime.combine(current.date(), PREMARKET_END, SHANGHAI_TZ)
-        if current_time > PREMARKET_END:
+        cutoff = datetime.combine(business_date, PREMARKET_END, SHANGHAI_TZ)
+        if current.date() != business_date or current > cutoff:
             raise PhaseTimeError(
-                "premarket schedule missed the 08:50 Asia/Shanghai cutoff; "
-                "current snapshot unavailable"
+                "SCHEDULE_MISSED_PHASE_WINDOW: premarket schedule missed the "
+                "08:50 Asia/Shanghai cutoff; current snapshot unavailable"
             )
-        return PhaseWaitPlan(phase, current, None, cutoff, 0)
+        return PhaseWaitPlan(phase, current, None, cutoff, 0, generation_mode)
     if phase == "midday":
-        target = datetime.combine(current.date(), MIDDAY_TARGET, SHANGHAI_TZ)
-        cutoff = datetime.combine(current.date(), MIDDAY_END, SHANGHAI_TZ)
+        target = datetime.combine(business_date, MIDDAY_TARGET, SHANGHAI_TZ)
+        cutoff = datetime.combine(business_date, MIDDAY_END, SHANGHAI_TZ)
     elif phase == "close":
-        target = datetime.combine(current.date(), CLOSE_TARGET, SHANGHAI_TZ)
-        cutoff = datetime.combine(current.date(), CLOSE_END, SHANGHAI_TZ)
+        close_date = expected_data_date or business_date
+        target = datetime.combine(close_date, CLOSE_TARGET, SHANGHAI_TZ)
+        cutoff = datetime.combine(close_date, CLOSE_END, SHANGHAI_TZ)
+        if generation_mode == "recovery":
+            wait_seconds = max(0, math.ceil((target - current).total_seconds()))
+            return PhaseWaitPlan(
+                phase,
+                current,
+                target,
+                cutoff,
+                wait_seconds,
+                generation_mode,
+            )
     else:
         raise ValueError(f"unsupported scheduled market phase: {phase}")
 
-    if current >= cutoff:
+    if current.date() != target.date() or current >= cutoff:
         raise PhaseTimeError(
-            f"{phase} schedule missed the {cutoff:%H:%M} Asia/Shanghai cutoff; "
-            "current snapshot unavailable"
+            f"SCHEDULE_MISSED_PHASE_WINDOW: {phase} schedule missed the "
+            f"{cutoff:%H:%M} Asia/Shanghai cutoff; current snapshot unavailable"
         )
     # Round up so sub-second workflow start times can never release before target.
     wait_seconds = max(0, math.ceil((target - current).total_seconds()))
-    return PhaseWaitPlan(phase, current, target, cutoff, wait_seconds)
+    return PhaseWaitPlan(
+        phase, current, target, cutoff, wait_seconds, generation_mode
+    )

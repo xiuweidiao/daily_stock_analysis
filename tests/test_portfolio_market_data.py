@@ -35,6 +35,7 @@ from scripts.portfolio_market_data import (
     validate_portfolio_codes,
     write_payload,
 )
+from scripts.portfolio_schedule_map import SCHEDULE_PHASES
 
 
 EXPECTED_HOLDINGS = (
@@ -659,35 +660,17 @@ def test_short_history_for_688825_remains_partial_without_fabrication() -> None:
 
 def test_workflow_scheduled_crons_match_resolve_phase_mapping() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(encoding="utf-8")
-    expected_mapping = [
-        ("37 22 * * 0-4", "premarket"),
-        ("07 23 * * 0-4", "premarket"),
-        ("37 23 * * 0-4", "premarket"),
-        ("53 2 * * 1-5", "midday"),
-        ("23 6 * * 1-5", "close"),
-        ("43 7 * * 1-5", "close"),
-        ("43 8 * * 1-5", "close"),
-        ("3 9 * * 1-5", "close"),
-    ]
     scheduled_crons = re.findall(
         r"^\s*- cron: '([^']+)'$", workflow, flags=re.MULTILINE
     )
-    premarket_mapping = re.search(
-        r'elif \[ "\$SCHEDULE_CRON" = "37 22 \* \* 0-4" \].*?'
-        r'\[ "\$SCHEDULE_CRON" = "07 23 \* \* 0-4" \].*?'
-        r'\[ "\$SCHEDULE_CRON" = "37 23 \* \* 0-4" \]; then\n'
-        r'\s+phase="premarket"',
-        workflow,
-        flags=re.DOTALL,
-    )
-    individual_mapping = re.findall(
-        r'elif \[ "\$SCHEDULE_CRON" = "([^"]+)" \]; then\n\s+phase="([^"]+)"',
-        workflow,
-    )
 
-    assert scheduled_crons == [cron for cron, _phase in expected_mapping]
-    assert premarket_mapping is not None
-    assert individual_mapping == expected_mapping[3:]
+    assert scheduled_crons == list(SCHEDULE_PHASES)
+    assert "python scripts/portfolio_schedule_map.py" in workflow
+    assert {SCHEDULE_PHASES[cron] for cron in scheduled_crons} == {
+        "premarket",
+        "midday",
+        "close",
+    }
 
 
 def test_premarket_cron_maps_utc_sunday_to_shanghai_monday() -> None:

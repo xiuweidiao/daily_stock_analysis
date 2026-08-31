@@ -11,7 +11,6 @@ import pytest
 
 from scripts.portfolio_close_readiness import (
     CloseReadiness,
-    NON_TRADING_DAY_SKIP,
     TODAY_CLOSE_ALREADY_READY,
     TODAY_CLOSE_INVALID,
     TODAY_CLOSE_MISSING,
@@ -19,7 +18,7 @@ from scripts.portfolio_close_readiness import (
     main as readiness_main,
 )
 from scripts.portfolio_config import PortfolioConfig
-from scripts.portfolio_phase_policy import PhaseTimeError, plan_scheduled_phase
+from scripts.portfolio_phase_policy import plan_scheduled_phase
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -82,12 +81,13 @@ def _write(path: Path, payload: dict) -> None:
 
 def _inspect(path: Path, now: datetime):
     with (
-        patch("scripts.portfolio_close_readiness.is_market_open", return_value=True),
-        patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
+        patch("scripts.portfolio_schedule_context.is_market_open", return_value=True),
         patch(
-            "scripts.validate_portfolio_snapshot._phase_data_date",
+            "scripts.portfolio_schedule_context.get_effective_trading_date",
             return_value=now.date(),
         ),
+        patch("scripts.portfolio_snapshot_readiness.is_market_open", return_value=True),
+        patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
     ):
         return inspect_close_snapshot(path, portfolio=PORTFOLIO, now=now)
 
@@ -216,49 +216,63 @@ def test_today_close_with_null_core_quote_is_invalid_and_regenerated(
 
     assert result.status == TODAY_CLOSE_INVALID
     assert result.should_generate is True
-    assert "latest_price must be a finite number" in result.reason
+    assert result.reason == "invalid_snapshot"
 
 
-def test_non_trading_day_skips_without_creating_snapshot(tmp_path: Path) -> None:
+def test_non_trading_day_can_recover_latest_missing_close(tmp_path: Path) -> None:
     path = tmp_path / "close.json"
-    with patch("scripts.portfolio_close_readiness.is_market_open", return_value=False):
+    with (
+        patch("scripts.portfolio_schedule_context.is_market_open", return_value=False),
+        patch(
+            "scripts.portfolio_schedule_context.get_effective_trading_date",
+            return_value=date(2026, 8, 21),
+        ),
+        patch("scripts.portfolio_snapshot_readiness.is_market_open", return_value=True),
+    ):
         result = inspect_close_snapshot(
             path,
             portfolio=PORTFOLIO,
             now=datetime(2026, 8, 22, 15, 43, tzinfo=SHANGHAI),
         )
 
-    assert result.status == NON_TRADING_DAY_SKIP
-    assert result.should_generate is False
+    assert result.status == TODAY_CLOSE_MISSING
+    assert result.should_generate is True
     assert not path.exists()
 
 
-def test_missing_close_after_1800_cannot_be_generated(tmp_path: Path) -> None:
+def test_missing_close_after_1800_uses_recovery_mode(tmp_path: Path) -> None:
     now = datetime(2026, 8, 19, 18, 1, tzinfo=SHANGHAI)
     result = _inspect(tmp_path / "close.json", now)
 
     assert result.status == TODAY_CLOSE_MISSING
     assert result.should_generate is True
-    with pytest.raises(PhaseTimeError, match="current snapshot unavailable"):
-        plan_scheduled_phase("close", now)
+    plan = plan_scheduled_phase(
+        "close",
+        now,
+        target_date=now.date(),
+        expected_data_date=now.date(),
+        generation_mode="recovery",
+    )
+    assert plan.wait_seconds == 0
+    assert plan.generation_mode == "recovery"
 
 
-def test_workflow_keeps_global_concurrency_and_emits_close_states() -> None:
+def test_workflow_uses_phase_concurrency_and_emits_failure_states() -> None:
     workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(
         encoding="utf-8"
     )
 
-    assert "group: portfolio-market-data-${{ github.ref }}" in workflow
-    assert "cancel-in-progress: false" in workflow
     assert (
-        "CLOSE_SHOULD_GENERATE: "
-        "${{ steps.close_readiness.outputs.should_generate }}"
+        "group: portfolio-market-data-${{ github.ref }}-"
+        "${{ needs.resolve_phase.outputs.phase }}"
     ) in workflow
-    assert "if: steps.decision.outputs.should_generate == 'true'" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "steps.readiness.outputs.should_generate" in workflow
+    assert "steps.decision.outputs.should_generate == 'true'" in workflow
     assert "if: steps.contract.outputs.generated == 'true'" in workflow
     for status in (
-        "TODAY_CLOSE_GENERATED",
-        "CLOSE_GENERATION_FAILED",
+        "SNAPSHOT_GENERATED",
+        "GENERATION_FAILED",
         "SNAPSHOT_CONTRACT_FAILED",
         "PUSH_FAILED",
     ):

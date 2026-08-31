@@ -193,7 +193,9 @@ def test_old_snapshot_is_not_accepted_as_current_fallback() -> None:
     payload = _payload("midday", generated_at, date(2026, 8, 17))
     portfolio = PortfolioConfig(version=1, holdings=("159567",), watchlist=("600519",))
 
-    with pytest.raises(SnapshotContractError, match="generated_at is not today"):
+    with pytest.raises(
+        SnapshotContractError, match="generated_at is not the target date"
+    ):
         validate_snapshot_contract(
             payload,
             phase="midday",
@@ -359,16 +361,20 @@ def test_workflow_waits_then_validates_before_phase_scoped_commit() -> None:
         encoding="utf-8"
     )
 
-    assert workflow.index("Check whether today's close is already ready") < workflow.index(
+    assert workflow.index("Check snapshot readiness") < workflow.index(
         "Wait for scheduled market target"
     )
     assert workflow.index("Wait for scheduled market target") < workflow.index(
         "Generate portfolio JSON"
     )
     assert workflow.index("Validate generated snapshot contract") < workflow.index(
-        "Commit updated snapshots"
+        "Commit updated snapshot safely"
     )
     assert "if: steps.contract.outputs.generated == 'true'" in workflow
-    assert 'git add -- "data/portfolio/${PHASE}.json"' in workflow
+    assert 'git add -- "$snapshot"' in workflow
     assert "--allow-phase-time-override" not in workflow
     assert "git pull --rebase origin" in workflow
+    assert (
+        "group: portfolio-market-data-${{ github.ref }}-"
+        "${{ needs.resolve_phase.outputs.phase }}"
+    ) in workflow

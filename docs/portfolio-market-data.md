@@ -11,10 +11,10 @@
 
 - `premarket`：`00:00 <= time <= 08:50`；
 - `midday`：`11:30 <= time < 13:00`；
-- `close`：`15:00 <= time < 18:00`；
+- `close` live：`15:00 <= time < 18:00`；若 scheduled run 严重迟到，允许以 `recovery` 模式在窗口后补齐最近一个已完成交易日；
 - `intraday`：`09:30 <= time <= 11:30` 或 `13:00 <= time < 15:00`。
 
-窗口外执行会返回 `PhaseTimeError`，不会新建或覆盖正式 JSON。采集脚本可在盘中运行，但不会把盘中数据写入 `close.json`。
+premarket/midday 窗口外执行会返回 `PhaseTimeError`，不会新建或覆盖正式 JSON。close recovery 是唯一例外：只能读取目标交易日完整日线，`generated_at` 保留真实补齐时间，不能读取次日实时行情，也不能伪造为 15 点生成。采集脚本可在盘中运行，但不会把盘中数据写入 `close.json`。
 
 ## 持仓与关注配置
 
@@ -46,7 +46,7 @@ python scripts/manage_portfolio.py show
 
 ## 数据源与降级
 
-脚本只注入无需 Token 的现有数据源，历史日线依次使用 Efinance、AkShare、PyTDX、Baostock、Tencent；实时行情依次使用 Efinance、AkShare 东方财富、AkShare 新浪、AkShare 腾讯。指数由同一组免费 Fetcher 获取并逐项补齐。单源失败会继续尝试后续源；全部失败时证券仍保留在 JSON 中，`source` 为 `unavailable`、`status` 为 `error`，详细原因写入顶层 `errors`。
+脚本只注入无需 Token 的现有数据源，历史日线依次使用 Efinance、AkShare、PyTDX、Baostock、Tencent；实时行情依次使用 Efinance、AkShare 东方财富、AkShare 新浪、AkShare 腾讯。live 指数由同一组免费 Fetcher 获取并逐项补齐；close recovery 的指数改用 AkShare 东方财富历史指数日线，并以 AkShare 新浪历史指数日线备用。单源失败会继续尝试后续源；全部失败时证券仍保留在 JSON 中，`source` 为 `unavailable`、`status` 为 `error`，详细原因写入顶层 `errors`。
 
 每条证券记录同时包含：
 
@@ -83,7 +83,7 @@ python scripts/portfolio_market_data.py --phase intraday
 python scripts/portfolio_market_data.py --phase intraday --config config/portfolio.json
 ```
 
-非交易日默认不写文件。正常模式下 `all` 总是拒绝且不写任何文件；它只允许通过以下显式诊断命令展开 `premarket`、`midday`、`close`：
+premarket/midday/intraday 在非交易日默认不写文件；close recovery 可在非交易日补齐最近缺失的已完成交易日。正常模式下 `all` 总是拒绝且不写任何文件；它只允许通过以下显式诊断命令展开 `premarket`、`midday`、`close`：
 
 ```bash
 python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
@@ -94,21 +94,21 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 独立 workflow `.github/workflows/portfolio-market-data.yml` 使用 UTC cron，对应北京时间：
 
 - `22:37 / 23:07 / 23:37 UTC` 周日至周四 = 次日 `06:37 / 07:07 / 07:37 Asia/Shanghai` 周一至周五：premarket 主任务与两次独立补偿（均在 `08:50` 窗口内）
-- `02:53 UTC` = `10:53 Asia/Shanghai`：midday 提前入队，workflow 在 `11:32` 前启动时会等待，`11:32 <= time < 13:00` 立即生成，`13:00` 后明确失败
+- `02:53 / 03:07 / 03:21 UTC` = `10:53 / 11:07 / 11:21 Asia/Shanghai`：midday 主任务与两次独立补偿；任一任务在 `11:32` 前启动时等待，`11:32 <= time < 13:00` 立即生成，已有 fresh snapshot 时幂等退出，`13:00` 后输出 `SCHEDULE_MISSED_PHASE_WINDOW` 并失败
 - `06:23 UTC` = `14:23 Asia/Shanghai`：close 主任务，在 `15:05` 前启动时等待至 `15:05`
 - `07:43 / 08:43 / 09:03 UTC` = `15:43 / 16:43 / 17:03 Asia/Shanghai`：close 三次自动补偿
 
-四个 close cron 共用同一套 workflow 逻辑。每次采集前先对已有 `close.json` 执行不受“生成后 30 分钟”限制的当日静态契约检查；今日快照已合法时输出 `TODAY_CLOSE_ALREADY_READY` 并不再采集、不改 `generated_at`、不提交。文件缺失或仍是上一交易日时输出 `TODAY_CLOSE_MISSING`；当日文件存在但契约错误时输出 `TODAY_CLOSE_INVALID`，两者才允许补偿生成。
+三个正式阶段统一使用 `scripts/portfolio_snapshot_readiness.py`。workflow 先由 nominal cron slot 解析目标业务日期，再计算期望 `data_date`，不会再用 runner 实际启动日期代替任务日期。fresh 时三阶段都跳过 generator 和 commit；missing/stale/invalid 时才进入阶段 gate、生成、contract validator 和提交。premarket/midday 严重迟到会明确失败，绝不使用下午或收盘行情补上午快照。
 
-premarket 的三个 cron 也共用一套 workflow 逻辑。每次开始先读取 `premarket.json`，复用正式 snapshot validator 检查阶段、时区、当日 `generated_at`、最近已完成交易日 `data_date`、证券池、核心行情字段及基准契约。已合法时输出 `PREMARKET_FRESH=true` / `reason=already_fresh`，跳过行情抓取、validator 和 commit；缺失、旧日期或无效文件才生成。生成器失败、新文件仍不通过契约，或生成后 `git diff` 仍为空，workflow 都明确失败，不会把昨日文件标成当日成功。
+close 的期望 `data_date` 是 nominal slot 对应时点“最近一个已经完成收盘的 A 股交易日”。例如周五任务延迟到周六 02:00，仍补周五：顶层 `generation_mode: "recovery"`，所有证券和基准只来自周五完整日线，`generated_at` 是真实周六时间。周一早上若 close 仍停留在上周四，则相对最近完成的上周五为 stale，允许 recovery；当前自然日非交易日不再直接阻止补齐。
 
-新生成的快照仍必须通过“本次执行 30 分钟内”的严格 validator：顶层不得有未解决 `errors`；每只持仓/关注证券的 `latest_price`、`prev_close`、`open`、`high`、`low`、`volume`、`amount` 必须为有限数值，并满足正价格、`high >= low`、成交量/成交额非负。历史不足导致技术指标为 `null` 仍允许以 `partial` 通过，这与今日核心行情缺失是两个不同契约。四个基准必须全部为 `ok`。只有 push 成功后才输出 `TODAY_CLOSE_GENERATED`；采集、契约或 push 失败分别输出 `CLOSE_GENERATION_FAILED`、`SNAPSHOT_CONTRACT_FAILED`、`PUSH_FAILED`。非交易日输出 `NON_TRADING_DAY_SKIP` 并不进入等待/采集。`18:00` 后若当日 close 仍缺失，phase gate 明确失败，不生成正式文件。
+新生成的快照仍必须通过“本次执行 30 分钟内”的严格 validator：顶层不得有未解决 `errors`；每只持仓/关注证券的 `latest_price`、`prev_close`、`open`、`high`、`low`、`volume`、`amount` 必须为有限数值，并满足正价格、`high >= low`、成交量/成交额非负。历史不足导致技术指标为 `null` 仍允许以 `partial` 通过，这与核心行情缺失是两个不同契约。recovery 额外要求证券/基准 `data_date` 等于目标交易日，且证券 `source_details.realtime` 必须为 `null`。生成器执行后若文件无 diff，系统重新检查 freshness；仍不 fresh 时输出 `SNAPSHOT_NOT_UPDATED` 并失败，三个正式 phase 不再有绿色特判。
 
 `workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动运行不会等待，直接由 Python 的真实时间窗口保护；`intraday` 不增加 cron。
 
-所有 scheduled run 仍共用一个 concurrency group，以避免并发向 `main` 产生 push race。延迟的 primary 会先完成提交，排队中的 retry 随后重新 checkout 并看到已合法的当日文件，因此幂等退出。提交前只 stage 当前 phase 的 JSON，并执行非强制 `git pull --rebase`；如果远端冲突，workflow 失败而不覆盖。
+concurrency 按 phase 隔离：同 phase 的 primary/fallback 串行，不同 phase 互不阻塞。每个 job 在 readiness 前先 fast-forward 到远端最新分支，commit 前再次检查远端同 phase freshness；提交只 stage 当前 phase JSON，并在 `pull --rebase` 后最多尝试 push 三次。远端已由另一个任务写入合法 snapshot 时 no-op，不覆盖或重复提交。
 
-每次 workflow 都在 Step Summary 记录北京时间、事件、cron、解析 phase、当前 snapshot 元数据、预期交易日、freshness 原因，以及 generator / validator / git diff / commit 结果。这可以区分“GitHub 未创建 run”、“run 触发但快照已新鲜”、“生成失败”、“契约失败”和“push 失败”。
+每次 workflow 都在 Step Summary 记录 nominal schedule slot、目标业务日期、期望 `data_date`、cutoff、实际北京时间、lateness minutes、当前 snapshot、readiness、generation mode、validator、git diff、commit 及最终远端 freshness。这可以区分“GitHub 未创建 run”、“scheduler 严重迟到错过窗口”、“run 触发但快照已新鲜”、“生成失败”、“契约失败”和“push 失败”。
 
 新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、当日 `generated_at`、阶段时间窗口、`data_date`、持仓/关注列表与 `config/portfolio.json` 及 `tracking_type` 都必须一致。配置证券池非空时 `stocks` 不得整体缺失。交易日判断跳过、未生成新文件或契约失败时，日志输出 `current snapshot unavailable`，不会把旧 JSON commit 成当日成功。
 
@@ -124,7 +124,7 @@ python scripts/check_portfolio_snapshot_ready.py --phase midday
 python scripts/check_portfolio_snapshot_ready.py --phase close
 ```
 
-脚本只读取 `data/portfolio/{phase}.json` 和 `config/portfolio.json`，不会抓取行情、修改或删除 snapshot，也不会创建另一套行情管道。`ready=true` 仅在文件存在，阶段、时区、当日 `generated_at`、phase 时间窗口、预期 `data_date`、配置证券池和完整正式 snapshot contract 全部通过时返回。消费者以 JSON 中的 `ready` 为判断依据；昨日文件返回 `stale_snapshot`，文件不存在返回 `missing_snapshot`，其余契约错误统一返回 `invalid_snapshot`。旧文件不会被删除或冒充当日数据。
+脚本只读取 `data/portfolio/{phase}.json` 和 `config/portfolio.json`，不会抓取行情、修改或删除 snapshot，也不会创建另一套行情管道。`ready=true` 仅在文件存在，阶段、时区、目标业务日期、预期 `data_date`、配置证券池和完整正式 snapshot contract 全部通过时返回；close recovery 的 `generated_at` 可以晚于 `data_date`，但必须是真实生成时间且不得早于目标交易日收盘。消费者以 JSON 中的 `ready` 为判断依据；旧于期望交易日的文件返回 `stale_snapshot`，文件不存在返回 `missing_snapshot`，其余契约错误统一返回 `invalid_snapshot`。旧文件不会被删除或冒充新数据。
 
 推荐读取与重试策略：
 
@@ -132,7 +132,7 @@ python scripts/check_portfolio_snapshot_ready.py --phase close
 - midday：建议 11:45 开始读取；未 ready 时每 5 分钟重试，最晚到 12:15；
 - close：建议 15:25 开始读取；未 ready 时每 5 分钟重试，最晚到 16:00。
 
-readiness 检查复用正式 validator，但不使用“生成后 30 分钟内”这一 commit 阶段限制，因此合法 midday 快照在 12:15 仍可判定 ready；日期、阶段窗口、证券池、核心行情字段和基准契约不会放宽。该机制解决消费者在 JSON 尚未 push 到 main 时的短暂可见性竞态，不要求修改生产 workflow。
+readiness 检查复用正式 validator，但不使用“生成后 30 分钟内”这一 commit 阶段限制，因此合法 midday 快照在 12:15 仍可判定 ready；日期、阶段窗口、证券池、核心行情字段和基准契约不会放宽。close readiness 按最近已完成交易日判断，允许识别晚生成但契约合法的 recovery 文件。
 
 PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.github/requirements-portfolio-pipeline.txt`，再执行 `pip check` 和 `python scripts/portfolio_market_data.py --help`，用于阻止轻量依赖清单与实际启动 import 链再次漂移。
 
@@ -169,3 +169,4 @@ PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.g
 - 多数免费实时源不提供供应商原始时间，此时 `provider_timestamp` 和 `data_timestamp` 为 `null`，`freshness_status` 为 `unknown`；只能确认 `fetched_at` 是抓取时间。
 - 阶段窗口只保护报告语义，不判断上游免费源是否延迟；是否可用仍应结合 `provider_timestamp`、`freshness_status` 和 `status` 判断。
 - workflow 向当前分支提交 JSON；若目标分支保护规则禁止 GitHub Actions 直接推送，需要仓库管理员允许该 bot，或改为由独立 PR 接收快照更新。
+- 多 cron 能降低单次 scheduled event 被 dropped 的风险，但 GitHub Scheduler 仍可能同时延迟或丢弃多个 event；仓库代码无法承诺绝对准时。premarket/midday 一旦所有 fallback 都晚于业务 cutoff，只能明确失败，不能事后伪造时点快照。
