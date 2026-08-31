@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -22,23 +22,10 @@ from scripts.portfolio_config import (
     PortfolioConfigError,
     load_portfolio_config,
 )
-from scripts.portfolio_market_data import (
-    OFFICIAL_OUTPUT_DIR,
-    REPORT_PHASES,
-    TIMEZONE_NAME,
-    _phase_data_date,
-)
-from scripts.portfolio_phase_policy import (
-    SHANGHAI_TZ,
-    PhaseTimeError,
-    as_shanghai_time,
-    validate_phase_time,
-)
-from scripts.validate_portfolio_snapshot import (
-    SnapshotContractError,
-    _parse_generated_at,
-    validate_snapshot_contract,
-)
+from scripts.portfolio_market_data import OFFICIAL_OUTPUT_DIR, REPORT_PHASES
+from scripts.portfolio_phase_policy import SHANGHAI_TZ, as_shanghai_time
+from scripts.portfolio_schedule_context import build_schedule_context
+from scripts.portfolio_snapshot_readiness import inspect_snapshot
 
 
 @dataclass(frozen=True)
@@ -87,58 +74,24 @@ def check_snapshot_ready(
     if phase not in REPORT_PHASES:
         raise ValueError(f"unsupported report phase: {phase}")
     current = as_shanghai_time(now or datetime.now(SHANGHAI_TZ))
-    if not path.exists():
-        return _not_ready(phase, "missing_snapshot")
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _not_ready(phase, "invalid_snapshot")
-    if not isinstance(payload, Mapping):
-        return _not_ready(phase, "invalid_snapshot")
-
-    if payload.get("market_phase") != phase:
-        return _not_ready(phase, "invalid_snapshot", payload=payload)
-    if payload.get("timezone") != TIMEZONE_NAME:
-        return _not_ready(phase, "invalid_snapshot", payload=payload)
-
-    try:
-        generated_at = _parse_generated_at(payload.get("generated_at"))
-    except SnapshotContractError:
-        return _not_ready(phase, "invalid_snapshot", payload=payload)
-    if generated_at.date() != current.date():
-        return _not_ready(phase, "stale_snapshot", payload=payload)
-
-    try:
-        validate_phase_time(phase, generated_at)
-    except PhaseTimeError:
-        return _not_ready(phase, "invalid_snapshot", payload=payload)
-
-    expected_data_date = _phase_data_date(phase, generated_at).isoformat()
-    if payload.get("data_date") != expected_data_date:
-        return _not_ready(
-            phase,
-            "invalid_snapshot",
-            payload=payload,
-        )
-
-    try:
-        validate_snapshot_contract(
-            payload,
-            phase=phase,
-            portfolio=portfolio,
-            now=current,
-            max_generation_age=None,
-        )
-    except SnapshotContractError:
-        return _not_ready(phase, "invalid_snapshot", payload=payload)
-
+    context = build_schedule_context(phase=phase, current=current)
+    result = inspect_snapshot(
+        path,
+        phase=phase,
+        portfolio=portfolio,
+        target_date=date.fromisoformat(context.target_date),
+        expected_data_date=date.fromisoformat(context.expected_data_date),
+        generation_mode=context.generation_mode,
+        now=current,
+        target_is_trading_day=context.target_is_trading_day,
+    )
+    reason = "ok" if result.fresh else result.reason
     return SnapshotReadiness(
         phase=phase,
-        ready=True,
-        reason="ok",
-        generated_at=payload["generated_at"],
-        data_date=payload["data_date"],
+        ready=result.fresh,
+        reason=reason,
+        generated_at=result.generated_at,
+        data_date=result.data_date,
     )
 
 

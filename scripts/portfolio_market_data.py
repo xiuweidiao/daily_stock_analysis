@@ -94,13 +94,28 @@ class DiagnosticOutputError(ValueError):
 class PortfolioSources(Protocol):
     """Dependency boundary used by deterministic tests and the live adapter."""
 
-    def history(self, code: str, *, end_date: date, days: int) -> Tuple[pd.DataFrame, str]: ...
+    def history(
+        self, code: str, *, end_date: date, days: int
+    ) -> Tuple[pd.DataFrame, str]:
+        ...
 
-    def quote(self, code: str) -> Tuple[Optional[Any], Optional[str], List[str]]: ...
+    def quote(
+        self, code: str
+    ) -> Tuple[Optional[Any], Optional[str], List[str]]:
+        ...
 
-    def name(self, code: str) -> str: ...
+    def name(self, code: str) -> str:
+        ...
 
-    def benchmarks(self) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]: ...
+    def benchmarks(
+        self,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]:
+        ...
+
+    def benchmark_history(
+        self, code: str, *, end_date: date, days: int
+    ) -> Tuple[pd.DataFrame, str]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -135,6 +150,9 @@ class FreeProjectSources:
         self._quote_cache: Dict[str, Tuple[Optional[Any], Optional[str], List[str]]] = {}
         self._name_cache: Dict[str, str] = {}
         self._benchmark_cache: Optional[Tuple[List[Dict[str, Any]], Dict[str, str], List[str]]] = None
+        self._benchmark_history_cache: Dict[
+            Tuple[str, date, int], Tuple[pd.DataFrame, str]
+        ] = {}
 
     def history(self, code: str, *, end_date: date, days: int) -> Tuple[pd.DataFrame, str]:
         key = (code, end_date, days)
@@ -214,6 +232,61 @@ class FreeProjectSources:
         result = (list(merged.values()), sources, errors)
         self._benchmark_cache = result
         return [dict(row) for row in result[0]], dict(result[1]), list(result[2])
+
+    def benchmark_history(
+        self, code: str, *, end_date: date, days: int
+    ) -> Tuple[pd.DataFrame, str]:
+        """Fetch completed index daily bars from two free AkShare endpoints."""
+        key = (code, end_date, days)
+        if key in self._benchmark_history_cache:
+            frame, source = self._benchmark_history_cache[key]
+            return frame.copy(), source
+        import akshare as ak
+
+        start_date = end_date - timedelta(days=max(days * 2, 30))
+        errors: List[str] = []
+        routes = (
+            (
+                "akshare_index_em",
+                lambda: ak.stock_zh_index_daily_em(
+                    symbol=code,
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                ),
+            ),
+            ("akshare_index_sina", lambda: ak.stock_zh_index_daily(symbol=code)),
+        )
+        aliases = {
+            "日期": "date",
+            "开盘": "open",
+            "最高": "high",
+            "最低": "low",
+            "收盘": "close",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+        for source, fetch in routes:
+            try:
+                frame = fetch()
+                if frame is None or frame.empty:
+                    raise ValueError("empty index history")
+                frame = frame.rename(columns=aliases).copy()
+                required = {"date", "open", "high", "low", "close", "volume"}
+                if not required.issubset(frame.columns):
+                    raise ValueError(
+                        f"index history missing columns: {sorted(required - set(frame.columns))}"
+                    )
+                frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+                frame = frame[
+                    frame["date"].dt.date <= end_date
+                ].sort_values("date").tail(days)
+                if frame.empty:
+                    raise ValueError("index history has no completed target bars")
+                self._benchmark_history_cache[key] = (frame.copy(), source)
+                return frame.copy(), source
+            except Exception as exc:
+                errors.append(f"{source}: {type(exc).__name__}: {exc}")
+        raise RuntimeError("; ".join(errors))
 
 
 def _finite_number(value: Any) -> Optional[float]:
@@ -530,6 +603,7 @@ def build_stock_item(
     expected_date: date,
     now: datetime,
     sources: PortfolioSources,
+    generation_mode: str = "live",
 ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
     fetched_at = now.isoformat()
     item = _empty_stock(code, tracking_type, fetched_at)
@@ -541,8 +615,11 @@ def build_stock_item(
         return item, errors
     history = _normalize_history_volume(history)
 
-    quote, quote_source, quote_errors = sources.quote(code)
-    realtime_used = phase != "premarket" and quote is not None
+    if generation_mode == "recovery":
+        quote, quote_source, quote_errors = None, None, []
+    else:
+        quote, quote_source, quote_errors = sources.quote(code)
+    realtime_used = phase != "premarket" and generation_mode != "recovery" and quote is not None
     volume_reconciliation = (
         _reconciled_quote_volume(history, quote, expected_date) if realtime_used else None
     )
@@ -599,7 +676,7 @@ def build_stock_item(
         partial_reasons.append("insufficient bars for MA60/return_60d")
     if not name:
         partial_reasons.append("security name unavailable")
-    if phase != "premarket" and quote is None:
+    if phase != "premarket" and generation_mode != "recovery" and quote is None:
         partial_reasons.append("realtime quote unavailable; daily history used")
         errors.append(
             {
@@ -643,9 +720,18 @@ def build_stock_item(
 
 
 def build_benchmarks(
-    *, sources: PortfolioSources, data_date: date, now: datetime, phase: str
+    *,
+    sources: PortfolioSources,
+    data_date: date,
+    now: datetime,
+    phase: str,
+    generation_mode: str = "live",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     fetched_at = now.isoformat()
+    if generation_mode == "recovery":
+        return build_recovery_benchmarks(
+            sources=sources, data_date=data_date, now=now
+        )
     rows, source_by_code, provider_errors = sources.benchmarks()
     by_code = {str(row.get("code") or "").lower(): row for row in rows}
     results: List[Dict[str, Any]] = []
@@ -712,6 +798,91 @@ def build_benchmarks(
     return results, errors
 
 
+def build_recovery_benchmarks(
+    *, sources: PortfolioSources, data_date: date, now: datetime
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Build close-recovery indexes only from completed target-date daily bars."""
+    fetched_at = now.isoformat()
+    results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+    for code, name in BENCHMARKS.items():
+        try:
+            frame, source = sources.benchmark_history(
+                code, end_date=data_date, days=5
+            )
+            bars = frame.copy()
+            bars["date"] = pd.to_datetime(bars["date"], errors="coerce")
+            for column in ("open", "high", "low", "close", "volume", "amount"):
+                if column in bars.columns:
+                    bars[column] = pd.to_numeric(bars[column], errors="coerce")
+            bars = bars.dropna(subset=["date", "close"]).sort_values("date")
+            target = bars[bars["date"].dt.date == data_date]
+            if target.empty:
+                raise ValueError(f"latest completed index bar is not {data_date}")
+            row = target.iloc[-1]
+            earlier = bars[bars["date"].dt.date < data_date]
+            previous_close = earlier.iloc[-1]["close"] if not earlier.empty else None
+            close = _finite_number(row.get("close"))
+            previous = _finite_number(previous_close)
+            change_pct = (
+                (close / previous - 1) * 100
+                if close is not None and previous not in {None, 0}
+                else None
+            )
+            high = _finite_number(row.get("high"))
+            low = _finite_number(row.get("low"))
+            amplitude = (
+                (high - low) / previous * 100
+                if high is not None and low is not None and previous not in {None, 0}
+                else None
+            )
+            results.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "latest_price": _rounded(close),
+                    "change_pct": _rounded(change_pct),
+                    "open": _rounded(row.get("open")),
+                    "high": _rounded(high),
+                    "low": _rounded(low),
+                    "prev_close": _rounded(previous),
+                    "volume": _rounded(row.get("volume"), 0),
+                    "amount": _rounded(row.get("amount"), 2),
+                    "amplitude": _rounded(amplitude),
+                    "source": source,
+                    "fetched_at": fetched_at,
+                    "provider_timestamp": None,
+                    "data_timestamp": None,
+                    "freshness_status": "unknown",
+                    "data_date": data_date.isoformat(),
+                    "status": "ok" if close is not None else "partial",
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "source": "unavailable",
+                    "fetched_at": fetched_at,
+                    "provider_timestamp": None,
+                    "data_timestamp": None,
+                    "freshness_status": "unknown",
+                    "data_date": data_date.isoformat(),
+                    "status": "error",
+                }
+            )
+            errors.append(
+                {
+                    "scope": "benchmark",
+                    "code": code,
+                    "stage": "history",
+                    "message": str(exc),
+                }
+            )
+    return results, errors
+
+
 def build_payload(
     phase: str,
     *,
@@ -719,6 +890,8 @@ def build_payload(
     portfolio: PortfolioConfig,
     now: Optional[datetime] = None,
     allow_phase_time_override: bool = False,
+    expected_data_date: date | None = None,
+    generation_mode: str = "live",
 ) -> Dict[str, Any]:
     if phase not in PHASES:
         raise ValueError(f"unsupported market phase: {phase}")
@@ -727,10 +900,21 @@ def build_payload(
         current = current.replace(tzinfo=SHANGHAI_TZ)
     else:
         current = current.astimezone(SHANGHAI_TZ)
-    if not allow_phase_time_override:
+    if generation_mode not in {"live", "recovery"}:
+        raise ValueError("generation_mode must be live or recovery")
+    if generation_mode == "recovery" and phase != "close":
+        raise ValueError("recovery generation_mode is only valid for close")
+    if generation_mode == "recovery":
+        if expected_data_date is None:
+            raise ValueError("close recovery requires expected_data_date")
+        if not is_market_open("cn", expected_data_date):
+            raise PhaseTimeError("close recovery target must be an A-share trading day")
+        if current < datetime.combine(expected_data_date, time(15, 0), SHANGHAI_TZ):
+            raise PhaseTimeError("close recovery cannot run before the target session closes")
+    elif not allow_phase_time_override:
         validate_phase_time(phase, current)
     generated_at = current.isoformat()
-    data_date = _phase_data_date(phase, current)
+    data_date = expected_data_date or _phase_data_date(phase, current)
     errors: List[Dict[str, str]] = []
     stocks: List[Dict[str, Any]] = []
     tracked_securities = portfolio.tracked_securities()
@@ -744,14 +928,19 @@ def build_payload(
             expected_date=data_date,
             now=current,
             sources=sources,
+            generation_mode=generation_mode,
         )
         stocks.append(item)
         errors.extend(item_errors)
     benchmarks, benchmark_errors = build_benchmarks(
-        sources=sources, data_date=data_date, now=current, phase=phase
+        sources=sources,
+        data_date=data_date,
+        now=current,
+        phase=phase,
+        generation_mode=generation_mode,
     )
     errors.extend(benchmark_errors)
-    return {
+    payload = {
         "generated_at": generated_at,
         "timezone": TIMEZONE_NAME,
         "market_phase": phase,
@@ -763,6 +952,9 @@ def build_payload(
         "benchmarks": benchmarks,
         "errors": errors,
     }
+    if phase == "close":
+        payload["generation_mode"] = generation_mode
+    return payload
 
 
 def write_payload(payload: Mapping[str, Any], output_path: Path) -> None:
@@ -781,6 +973,10 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="generate on a non-trading day (manual diagnostics only)",
+    )
+    parser.add_argument("--expected-data-date", type=date.fromisoformat)
+    parser.add_argument(
+        "--generation-mode", choices=("live", "recovery"), default="live"
     )
     parser.add_argument(
         "--allow-phase-time-override",
@@ -811,6 +1007,8 @@ def generate_snapshots(
     now: datetime,
     output_dir: Path,
     allow_phase_time_override: bool = False,
+    expected_data_date: date | None = None,
+    generation_mode: str = "live",
 ) -> List[Path]:
     if phase_selection == "all" and not allow_phase_time_override:
         raise PhaseTimeError(
@@ -823,7 +1021,7 @@ def generate_snapshots(
         raise DiagnosticOutputError(
             "diagnostics cannot write to the official data/portfolio directory"
         )
-    if not allow_phase_time_override:
+    if not allow_phase_time_override and generation_mode != "recovery":
         for phase in phases:
             validate_phase_time(phase, now)
 
@@ -835,6 +1033,8 @@ def generate_snapshots(
             portfolio=portfolio,
             now=now,
             allow_phase_time_override=allow_phase_time_override,
+            expected_data_date=expected_data_date,
+            generation_mode=generation_mode,
         )
         output_path = output_dir / f"{phase}.json"
         write_payload(payload, output_path)
@@ -862,7 +1062,8 @@ def main() -> int:
             raise PhaseTimeError(
                 "all is diagnostics/tests only; use --allow-phase-time-override"
             )
-        if not args.force and not is_market_open("cn", now.date()):
+        recovery_run = args.phase == "close" and args.generation_mode == "recovery"
+        if not args.force and not recovery_run and not is_market_open("cn", now.date()):
             LOGGER.info(
                 "%s is not an A-share trading day; no portfolio files were updated",
                 now.date(),
@@ -876,6 +1077,8 @@ def main() -> int:
             now=now,
             output_dir=output_dir,
             allow_phase_time_override=args.allow_phase_time_override,
+            expected_data_date=args.expected_data_date,
+            generation_mode=args.generation_mode,
         )
     except (DiagnosticOutputError, PhaseTimeError, PortfolioConfigError) as exc:
         LOGGER.error("%s; no portfolio files were updated", exc)

@@ -2,12 +2,15 @@ name: Portfolio Market Data
 
 on:
   schedule:
-    # GitHub cron is UTC. Three independent premarket schedules compensate for a dropped run.
+    # UTC -> Asia/Shanghai: 06:37, 07:07, 07:37 Monday-Friday.
     - cron: '37 22 * * 0-4'
     - cron: '07 23 * * 0-4'
     - cron: '37 23 * * 0-4'
-    # Midday/close enter the queue early; close retries compensate for missed/failed runs.
+    # UTC -> Asia/Shanghai: 10:53, 11:07, 11:21 Monday-Friday.
     - cron: '53 2 * * 1-5'
+    - cron: '07 3 * * 1-5'
+    - cron: '21 3 * * 1-5'
+    # UTC -> Asia/Shanghai: 14:23, 15:43, 16:43, 17:03 Monday-Friday.
     - cron: '23 6 * * 1-5'
     - cron: '43 7 * * 1-5'
     - cron: '43 8 * * 1-5'
@@ -25,17 +28,47 @@ on:
           - close
           - intraday
 
-concurrency:
-  group: portfolio-market-data-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: write
 
 jobs:
+  resolve_phase:
+    runs-on: ubuntu-latest
+    outputs:
+      phase: ${{ steps.phase.outputs.phase }}
+    steps:
+      - name: Checkout schedule map
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts/portfolio_schedule_map.py
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve phase
+        id: phase
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_PHASE: ${{ inputs.phase }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
+        run: |
+          args=()
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            args+=(--manual-phase "$MANUAL_PHASE")
+          else
+            args+=(--schedule "$SCHEDULE_CRON")
+          fi
+          python scripts/portfolio_schedule_map.py "${args[@]}"
+
   generate:
+    needs: resolve_phase
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    concurrency:
+      group: portfolio-market-data-${{ github.ref }}-${{ needs.resolve_phase.outputs.phase }}
+      cancel-in-progress: false
+    env:
+      PHASE: ${{ needs.resolve_phase.outputs.phase }}
+      EVENT_NAME: ${{ github.event_name }}
+      SCHEDULE_CRON: ${{ github.event.schedule }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -49,61 +82,44 @@ jobs:
           cache: pip
           cache-dependency-path: .github/requirements-portfolio-pipeline.txt
 
-      - name: Resolve phase
-        id: phase
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          MANUAL_PHASE: ${{ inputs.phase }}
-          SCHEDULE_CRON: ${{ github.event.schedule }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            phase="$MANUAL_PHASE"
-          elif [ "$SCHEDULE_CRON" = "37 22 * * 0-4" ] ||
-               [ "$SCHEDULE_CRON" = "07 23 * * 0-4" ] ||
-               [ "$SCHEDULE_CRON" = "37 23 * * 0-4" ]; then
-            phase="premarket"
-          elif [ "$SCHEDULE_CRON" = "53 2 * * 1-5" ]; then
-            phase="midday"
-          elif [ "$SCHEDULE_CRON" = "23 6 * * 1-5" ]; then
-            phase="close"
-          elif [ "$SCHEDULE_CRON" = "43 7 * * 1-5" ]; then
-            phase="close"
-          elif [ "$SCHEDULE_CRON" = "43 8 * * 1-5" ]; then
-            phase="close"
-          elif [ "$SCHEDULE_CRON" = "3 9 * * 1-5" ]; then
-            phase="close"
-          else
-            echo "Unknown trigger: $SCHEDULE_CRON" >&2
-            exit 1
-          fi
-          echo "phase=$phase" >> "$GITHUB_OUTPUT"
-
       - name: Install token-free market data dependencies
         run: pip install -r .github/requirements-portfolio-pipeline.txt
 
-      - name: Check whether today's premarket is already ready
-        id: premarket_readiness
-        if: steps.phase.outputs.phase == 'premarket'
-        run: python scripts/portfolio_premarket_readiness.py
+      - name: Refresh branch before readiness
+        run: git pull --ff-only origin "$GITHUB_REF_NAME"
 
-      - name: Check whether today's close is already ready
-        id: close_readiness
-        if: steps.phase.outputs.phase == 'close'
-        run: python scripts/portfolio_close_readiness.py
+      - name: Resolve schedule and business-date context
+        id: context
+        run: |
+          args=(--phase "$PHASE")
+          if [ -n "$SCHEDULE_CRON" ]; then
+            args+=(--schedule "$SCHEDULE_CRON")
+          fi
+          python scripts/portfolio_schedule_context.py "${args[@]}"
+
+      - name: Check snapshot readiness
+        id: readiness
+        if: env.PHASE != 'intraday'
+        env:
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
+        run: |
+          python scripts/portfolio_snapshot_readiness.py \
+            --phase "$PHASE" \
+            --target-date "$TARGET_DATE" \
+            --expected-data-date "$EXPECTED_DATA_DATE" \
+            --generation-mode "$GENERATION_MODE"
 
       - name: Decide whether generation is required
         id: decision
         env:
-          PHASE: ${{ steps.phase.outputs.phase }}
-          PREMARKET_SHOULD_GENERATE: ${{ steps.premarket_readiness.outputs.should_generate }}
-          CLOSE_SHOULD_GENERATE: ${{ steps.close_readiness.outputs.should_generate }}
+          FORMAL_SHOULD_GENERATE: ${{ steps.readiness.outputs.should_generate }}
         run: |
-          if [ "$PHASE" = "premarket" ]; then
-            should_generate="$PREMARKET_SHOULD_GENERATE"
-          elif [ "$PHASE" = "close" ]; then
-            should_generate="$CLOSE_SHOULD_GENERATE"
+          if [ "$PHASE" = "intraday" ]; then
+            should_generate=true
           else
-            should_generate="true"
+            should_generate="$FORMAL_SHOULD_GENERATE"
           fi
           if [ "$should_generate" != "true" ] && [ "$should_generate" != "false" ]; then
             echo "Invalid generation decision for $PHASE: $should_generate" >&2
@@ -112,27 +128,67 @@ jobs:
           echo "should_generate=$should_generate" >> "$GITHUB_OUTPUT"
 
       - name: Wait for scheduled market target
+        id: gate
         if: >-
           github.event_name == 'schedule' &&
           steps.decision.outputs.should_generate == 'true'
         env:
-          PHASE: ${{ steps.phase.outputs.phase }}
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
+          EXPECTED_SLOT: ${{ steps.context.outputs.expected_slot }}
+          LATENESS_MINUTES: ${{ steps.context.outputs.lateness_minutes }}
+          CUTOFF: ${{ steps.context.outputs.cutoff }}
         run: |
-          if ! python scripts/portfolio_phase_gate.py --phase "$PHASE"; then
-            if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; fi
+          if ! python scripts/portfolio_phase_gate.py \
+            --phase "$PHASE" \
+            --target-date "$TARGET_DATE" \
+            --expected-data-date "$EXPECTED_DATA_DATE" \
+            --generation-mode "$GENERATION_MODE"; then
+            echo "phase=$PHASE"
+            echo "expected_slot=$EXPECTED_SLOT"
+            echo "actual_start=$(TZ=Asia/Shanghai date --iso-8601=seconds)"
+            echo "lateness=${LATENESS_MINUTES}m"
+            echo "cutoff=${CUTOFF:-none}"
+            echo "result=SCHEDULE_MISSED_PHASE_WINDOW"
             exit 1
           fi
 
+      - name: Recheck readiness before generator
+        id: before_generator
+        if: >-
+          env.PHASE != 'intraday' &&
+          steps.decision.outputs.should_generate == 'true'
+        env:
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
+        run: |
+          python scripts/portfolio_snapshot_readiness.py \
+            --phase "$PHASE" \
+            --target-date "$TARGET_DATE" \
+            --expected-data-date "$EXPECTED_DATA_DATE" \
+            --generation-mode "$GENERATION_MODE"
+
       - name: Generate portfolio JSON
         id: generator
-        if: steps.decision.outputs.should_generate == 'true'
+        if: >-
+          steps.decision.outputs.should_generate == 'true' &&
+          (env.PHASE == 'intraday' || steps.before_generator.outputs.should_generate == 'true')
         env:
-          PHASE: ${{ steps.phase.outputs.phase }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
         run: |
           echo "attempted=true" >> "$GITHUB_OUTPUT"
-          if ! python scripts/portfolio_market_data.py --phase "$PHASE"; then
-            if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; fi
-            if [ "$PHASE" = "premarket" ]; then echo "PREMARKET_GENERATION_FAILED"; fi
+          args=(--phase "$PHASE")
+          if [ "$PHASE" != "intraday" ]; then
+            args+=(--expected-data-date "$EXPECTED_DATA_DATE")
+          fi
+          if [ "$PHASE" = "close" ]; then
+            args+=(--generation-mode "$GENERATION_MODE")
+          fi
+          if ! python scripts/portfolio_market_data.py "${args[@]}"; then
+            echo "GENERATION_FAILED"
             echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
@@ -140,171 +196,213 @@ jobs:
 
       - name: Validate generated snapshot contract
         id: contract
-        if: steps.decision.outputs.should_generate == 'true'
+        if: steps.generator.outputs.attempted == 'true'
         env:
-          PHASE: ${{ steps.phase.outputs.phase }}
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
         run: |
           snapshot="data/portfolio/${PHASE}.json"
           if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
-            echo "current snapshot unavailable: no new $snapshot was generated"
-            echo "generated=false" >> "$GITHUB_OUTPUT"
             echo "git_diff=unchanged" >> "$GITHUB_OUTPUT"
+            if [ "$PHASE" != "intraday" ]; then
+              readiness="$(python scripts/portfolio_snapshot_readiness.py \
+                --phase "$PHASE" \
+                --target-date "$TARGET_DATE" \
+                --expected-data-date "$EXPECTED_DATA_DATE" \
+                --generation-mode "$GENERATION_MODE")"
+              if [ "$(printf '%s' "$readiness" | jq -r '.fresh')" = "true" ]; then
+                echo "generated=false" >> "$GITHUB_OUTPUT"
+                echo "validator=pass" >> "$GITHUB_OUTPUT"
+                echo "SNAPSHOT_ALREADY_FRESH"
+                exit 0
+              fi
+            fi
+            echo "generated=false" >> "$GITHUB_OUTPUT"
             echo "validator=fail" >> "$GITHUB_OUTPUT"
-            if [ "$PHASE" = "close" ]; then echo "CLOSE_GENERATION_FAILED"; exit 1; fi
-            if [ "$PHASE" = "premarket" ]; then echo "PREMARKET_GENERATION_FAILED"; exit 1; fi
-            exit 0
+            echo "SNAPSHOT_NOT_UPDATED"
+            exit 1
           fi
           echo "git_diff=changed" >> "$GITHUB_OUTPUT"
-          if ! python scripts/validate_portfolio_snapshot.py --phase "$PHASE" --path "$snapshot"; then
-            if [ "$PHASE" = "close" ]; then echo "SNAPSHOT_CONTRACT_FAILED"; fi
-            if [ "$PHASE" = "premarket" ]; then echo "PREMARKET_CONTRACT_FAILED"; fi
+          args=(--phase "$PHASE" --path "$snapshot")
+          if [ "$PHASE" != "intraday" ]; then
+            args+=(--target-date "$TARGET_DATE")
+            args+=(--expected-data-date "$EXPECTED_DATA_DATE")
+            args+=(--generation-mode "$GENERATION_MODE")
+          fi
+          if ! python scripts/validate_portfolio_snapshot.py "${args[@]}"; then
+            echo "SNAPSHOT_CONTRACT_FAILED"
             echo "validator=fail" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "generated=true" >> "$GITHUB_OUTPUT"
           echo "validator=pass" >> "$GITHUB_OUTPUT"
 
-      - name: Commit updated snapshots
+      - name: Commit updated snapshot safely
         id: commit
         if: steps.contract.outputs.generated == 'true'
         env:
-          PHASE: ${{ steps.phase.outputs.phase }}
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
         run: |
-          git add -- "data/portfolio/${PHASE}.json"
+          snapshot="data/portfolio/${PHASE}.json"
+          remote_is_fresh() {
+            if [ "$PHASE" = "intraday" ]; then
+              return 1
+            fi
+            git fetch origin "$GITHUB_REF_NAME"
+            remote_snapshot="$(mktemp)"
+            if ! git show "origin/${GITHUB_REF_NAME}:${snapshot}" > "$remote_snapshot" 2>/dev/null; then
+              rm -f "$remote_snapshot"
+              return 1
+            fi
+            readiness="$(python scripts/portfolio_snapshot_readiness.py \
+              --phase "$PHASE" \
+              --path "$remote_snapshot" \
+              --target-date "$TARGET_DATE" \
+              --expected-data-date "$EXPECTED_DATA_DATE" \
+              --generation-mode "$GENERATION_MODE")"
+            rm -f "$remote_snapshot"
+            [ "$(printf '%s' "$readiness" | jq -r '.fresh')" = "true" ]
+          }
+
+          if remote_is_fresh; then
+            echo "REMOTE_SNAPSHOT_ALREADY_FRESH"
+            echo "result=no-op" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add -- "$snapshot"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git commit -m "chore: update portfolio ${PHASE} data"; then
-            if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
+            echo "PUSH_FAILED"
             echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
           fi
-          if ! git pull --rebase origin "$GITHUB_REF_NAME"; then
-            if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
-            echo "result=failed" >> "$GITHUB_OUTPUT"
+
+          for attempt in 1 2 3; do
+            if ! git pull --rebase origin "$GITHUB_REF_NAME"; then
+              echo "PUSH_FAILED: rebase attempt $attempt"
+              echo "result=failed" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            if remote_is_fresh; then
+              echo "REMOTE_SNAPSHOT_ALREADY_FRESH"
+              echo "result=no-op" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then
+              echo "result=committed" >> "$GITHUB_OUTPUT"
+              echo "SNAPSHOT_GENERATED"
+              exit 0
+            fi
+            echo "push attempt $attempt failed; refreshing remote before retry"
+          done
+          echo "PUSH_FAILED"
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Verify final remote freshness
+        id: final
+        if: >-
+          success() &&
+          env.PHASE != 'intraday' &&
+          steps.readiness.outputs.reason != 'non_trading_day'
+        env:
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
+        run: |
+          git fetch origin "$GITHUB_REF_NAME"
+          remote_snapshot="$(mktemp)"
+          if ! git show "origin/${GITHUB_REF_NAME}:data/portfolio/${PHASE}.json" > "$remote_snapshot" 2>/dev/null; then
+            echo "FINAL_SNAPSHOT_NOT_FRESH"
             exit 1
           fi
-          if ! git push origin "HEAD:$GITHUB_REF_NAME"; then
-            if [ "$PHASE" = "close" ]; then echo "PUSH_FAILED"; fi
-            echo "result=failed" >> "$GITHUB_OUTPUT"
+          readiness="$(python scripts/portfolio_snapshot_readiness.py \
+            --phase "$PHASE" \
+            --path "$remote_snapshot" \
+            --target-date "$TARGET_DATE" \
+            --expected-data-date "$EXPECTED_DATA_DATE" \
+            --generation-mode "$GENERATION_MODE")"
+          rm -f "$remote_snapshot"
+          printf '%s\n' "$readiness"
+          if [ "$(printf '%s' "$readiness" | jq -r '.fresh')" != "true" ]; then
+            echo "FINAL_SNAPSHOT_NOT_FRESH"
             exit 1
           fi
-          echo "result=committed" >> "$GITHUB_OUTPUT"
-          if [ "$PHASE" = "close" ]; then echo "TODAY_CLOSE_GENERATED"; fi
+          echo "fresh=true" >> "$GITHUB_OUTPUT"
+          echo "generated_at=$(printf '%s' "$readiness" | jq -r '.generated_at // ""')" >> "$GITHUB_OUTPUT"
+          echo "data_date=$(printf '%s' "$readiness" | jq -r '.data_date // ""')" >> "$GITHUB_OUTPUT"
 
       - name: Write workflow summary
         if: always()
         env:
-          PHASE: ${{ steps.phase.outputs.phase }}
-          EVENT_NAME: ${{ github.event_name }}
-          SCHEDULE_CRON: ${{ github.event.schedule }}
-          PREMARKET_FRESHNESS: ${{ steps.premarket_readiness.outputs.freshness }}
-          PREMARKET_REASON: ${{ steps.premarket_readiness.outputs.reason }}
-          PREMARKET_TODAY_CN: ${{ steps.premarket_readiness.outputs.today_cn }}
-          PREMARKET_EXPECTED_DATE: ${{ steps.premarket_readiness.outputs.latest_completed_trading_day }}
-          CLOSE_STATUS: ${{ steps.close_readiness.outputs.status }}
-          GENERATOR_OUTCOME: ${{ steps.generator.outcome }}
-          VALIDATOR_OUTCOME: ${{ steps.contract.outcome }}
+          EXPECTED_SLOT: ${{ steps.context.outputs.expected_slot }}
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
+          EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
+          CUTOFF: ${{ steps.context.outputs.cutoff }}
+          CONTEXT_TIME: ${{ steps.context.outputs.current_beijing_time }}
+          LATENESS_MINUTES: ${{ steps.context.outputs.lateness_minutes }}
+          GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
+          CONTEXT_REASON: ${{ steps.context.outputs.reason }}
+          CURRENT_GENERATED_AT: ${{ steps.readiness.outputs.generated_at }}
+          CURRENT_DATA_DATE: ${{ steps.readiness.outputs.data_date }}
+          CURRENT_MARKET_PHASE: ${{ steps.readiness.outputs.market_phase }}
+          CURRENT_PORTFOLIO_STATUS: ${{ steps.readiness.outputs.portfolio_status }}
+          READINESS_FRESHNESS: ${{ steps.readiness.outputs.freshness }}
+          READINESS_REASON: ${{ steps.readiness.outputs.reason }}
+          GENERATOR_RESULT: ${{ steps.generator.outputs.result }}
           VALIDATOR_RESULT: ${{ steps.contract.outputs.validator }}
           GIT_DIFF_RESULT: ${{ steps.contract.outputs.git_diff }}
-          SNAPSHOT_GENERATED: ${{ steps.contract.outputs.generated }}
-          COMMIT_OUTCOME: ${{ steps.commit.outcome }}
           COMMIT_RESULT: ${{ steps.commit.outputs.result }}
+          GATE_STATUS: ${{ steps.gate.outputs.status }}
+          FINAL_FRESH: ${{ steps.final.outputs.fresh }}
+          FINAL_GENERATED_AT: ${{ steps.final.outputs.generated_at }}
+          FINAL_DATA_DATE: ${{ steps.final.outputs.data_date }}
         run: |
-          snapshot="data/portfolio/${PHASE}.json"
-          beijing_time="$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %z')"
-          today_cn="${PREMARKET_TODAY_CN:-$(TZ=Asia/Shanghai date +%F)}"
-          schedule_expression="${SCHEDULE_CRON:-manual}"
-
-          generated_at="unavailable"
-          data_date="unavailable"
-          market_phase="unavailable"
-          portfolio_status="unavailable"
-          if jq -e 'type == "object"' "$snapshot" >/dev/null 2>&1; then
-            generated_at="$(jq -r '.generated_at // "unavailable"' "$snapshot")"
-            data_date="$(jq -r '.data_date // "unavailable"' "$snapshot")"
-            market_phase="$(jq -r '.market_phase // "unavailable"' "$snapshot")"
-            portfolio_status="$(jq -r '.portfolio_status // "unavailable"' "$snapshot")"
-          fi
-
-          latest_completed="${PREMARKET_EXPECTED_DATE:-unavailable}"
-          if [ "$latest_completed" = "unavailable" ]; then
-            latest_completed="$(python -c 'from datetime import datetime; from scripts.portfolio_market_data import _phase_data_date; from scripts.portfolio_phase_policy import SHANGHAI_TZ; print(_phase_data_date("premarket", datetime.now(SHANGHAI_TZ)))' 2>/dev/null || echo unavailable)"
-          fi
-
-          freshness="${PREMARKET_FRESHNESS:-unknown}"
-          freshness_reason="${PREMARKET_REASON:-not_checked_before_generation}"
-          if [ "$SNAPSHOT_GENERATED" = "true" ]; then
-            freshness="fresh"
-            freshness_reason="generated_and_validated"
-          elif [ "$PHASE" = "close" ]; then
-            case "$CLOSE_STATUS" in
-              TODAY_CLOSE_ALREADY_READY)
-                freshness="fresh"
-                freshness_reason="already_fresh"
-                ;;
-              TODAY_CLOSE_INVALID)
-                freshness="invalid"
-                freshness_reason="$CLOSE_STATUS"
-                ;;
-              *)
-                freshness="stale"
-                freshness_reason="${CLOSE_STATUS:-no_valid_snapshot_generated}"
-                ;;
-            esac
-          elif [ "$VALIDATOR_OUTCOME" = "failure" ]; then
-            freshness="invalid"
-            freshness_reason="snapshot_contract_failed"
-          elif [ "$freshness" = "unknown" ]; then
-            freshness="stale"
-            freshness_reason="no_valid_snapshot_generated"
-          fi
-
-          case "$GENERATOR_OUTCOME" in
-            success) generator_result="run" ;;
-            failure) generator_result="failed" ;;
-            *) generator_result="skipped" ;;
-          esac
-          if [ "$VALIDATOR_RESULT" = "pass" ]; then
-            validator_result="pass"
-          elif [ "$VALIDATOR_OUTCOME" = "failure" ]; then
-            validator_result="fail"
-          else
-            validator_result="skipped"
-          fi
-          git_diff_result="${GIT_DIFF_RESULT:-unchanged}"
-          if [ "$COMMIT_RESULT" = "committed" ]; then
-            commit_result="committed"
-          elif [ "$COMMIT_OUTCOME" = "failure" ]; then
-            commit_result="failed"
-          else
-            commit_result="no-op"
-          fi
-
           {
             echo "## Portfolio Market Data"
             echo
-            echo "Beijing time: $beijing_time"
-            echo "Event: $EVENT_NAME"
-            echo "Schedule expression: $schedule_expression"
-            echo "Resolved phase: ${PHASE:-unknown}"
-            echo
-            echo "Current snapshot:"
-            echo "- generated_at: $generated_at"
-            echo "- data_date: $data_date"
-            echo "- market_phase: $market_phase"
-            echo "- portfolio_status: $portfolio_status"
+            echo "Event: ${EVENT_NAME}"
+            echo "Schedule expression: ${SCHEDULE_CRON:-manual}"
+            echo "Resolved phase: ${PHASE}"
             echo
             echo "Expected:"
-            echo "- today_cn: $today_cn"
-            echo "- latest_completed_trading_day: $latest_completed"
+            echo "- expected schedule slot: ${EXPECTED_SLOT:-unavailable}"
+            echo "- expected trading date: ${TARGET_DATE:-unavailable}"
+            echo "- expected data_date: ${EXPECTED_DATA_DATE:-unavailable}"
+            echo "- cutoff: ${CUTOFF:-none}"
             echo
-            echo "Freshness:"
-            echo "- $freshness"
-            echo "- reason: $freshness_reason"
+            echo "Actual:"
+            echo "- workflow run id: ${GITHUB_RUN_ID}"
+            echo "- job start Beijing time: ${CONTEXT_TIME:-unavailable}"
+            echo "- current Beijing time: $(TZ=Asia/Shanghai date --iso-8601=seconds)"
+            echo "- lateness_minutes: ${LATENESS_MINUTES:-unavailable}"
+            echo
+            echo "Current snapshot:"
+            echo "- generated_at: ${CURRENT_GENERATED_AT:-unavailable}"
+            echo "- data_date: ${CURRENT_DATA_DATE:-unavailable}"
+            echo "- market_phase: ${CURRENT_MARKET_PHASE:-unavailable}"
+            echo "- portfolio_status: ${CURRENT_PORTFOLIO_STATUS:-unavailable}"
+            echo
+            echo "Readiness:"
+            echo "- ${READINESS_FRESHNESS:-not-checked}"
+            echo "- reason: ${READINESS_REASON:-not-checked}"
+            echo "- schedule decision: ${CONTEXT_REASON:-unavailable}"
             echo
             echo "Execution:"
-            echo "- generator: $generator_result"
-            echo "- validator: $validator_result"
-            echo "- git diff: $git_diff_result"
-            echo "- commit: $commit_result"
+            echo "- phase gate: ${GATE_STATUS:-skipped}"
+            echo "- generator: ${GENERATOR_RESULT:-skipped}"
+            echo "- generation mode: ${GENERATION_MODE:-live}"
+            echo "- validator: ${VALIDATOR_RESULT:-skipped}"
+            echo "- git diff: ${GIT_DIFF_RESULT:-unchanged}"
+            echo "- commit: ${COMMIT_RESULT:-no-op}"
+            echo
+            echo "Final:"
+            echo "- snapshot fresh: ${FINAL_FRESH:-false}"
+            echo "- final generated_at: ${FINAL_GENERATED_AT:-unavailable}"
+            echo "- final data_date: ${FINAL_DATA_DATE:-unavailable}"
           } >> "$GITHUB_STEP_SUMMARY"

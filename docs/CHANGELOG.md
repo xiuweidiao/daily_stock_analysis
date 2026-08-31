@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] A 股持仓午盘与收盘 workflow 改为提前入队、等待合法行情时点，并在提交前校验新快照的阶段、时间、数据日期与证券池契约。
 - [修复] 为 A 股收盘快照增加三次幂等自动补偿、可识别运行状态与手/股成交量归一化，避免单次调度失败和相对成交量放大 100 倍。
 - [修复] 为 A 股盘前快照增加 07:07/07:37 独立补偿、正式契约 freshness gate 与 Actions 摘要，避免单次 scheduled event 丢失导致当日文件缺失。
+- [修复] 统一 A 股持仓三阶段 schedule 目标日期与 snapshot readiness，增加午盘双 fallback、close 完整日线 recovery、phase 级并发及最终远端 freshness 门禁。
 
 ## [3.30.0] - 2026-08-09
 
