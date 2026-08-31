@@ -25,7 +25,7 @@ from scripts.portfolio_phase_policy import (
     SHANGHAI_TZ,
     as_shanghai_time,
 )
-from scripts.portfolio_schedule_map import SCHEDULE_PHASES, resolve_phase
+from scripts.portfolio_schedule_map import ALL_SCHEDULE_PHASES, resolve_phase
 from src.core.trading_calendar import get_effective_trading_date, is_market_open
 
 
@@ -65,7 +65,7 @@ def _cron_weekdays(field: str) -> set[int]:
 
 def scheduled_slot(schedule: str, current: datetime) -> datetime:
     """Return the latest nominal UTC slot for this exact schedule at/before current."""
-    if schedule not in SCHEDULE_PHASES:
+    if schedule not in ALL_SCHEDULE_PHASES:
         raise ValueError(f"unknown portfolio schedule: {schedule!r}")
     minute_field, hour_field, _, _, weekday_field = schedule.split()
     minute = int(minute_field)

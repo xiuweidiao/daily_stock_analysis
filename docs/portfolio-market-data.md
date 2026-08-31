@@ -98,6 +98,8 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 - `06:23 UTC` = `14:23 Asia/Shanghai`：close 主任务，在 `15:05` 前启动时等待至 `15:05`
 - `07:43 / 08:43 / 09:03 UTC` = `15:43 / 16:43 / 17:03 Asia/Shanghai`：close 三次自动补偿
 
+独立 workflow `.github/workflows/portfolio-close-watchdog.yml` 不依赖上述 close run 是否曾被 GitHub 创建。它在北京时间 `16:17 / 17:17 / 18:17 / 19:17 / 20:17`（UTC `08:17 / 09:17 / 10:17 / 11:17 / 12:17`）执行状态驱动检查：目标日期不是交易日时输出 `NON_TRADING_DAY`；远端 close 已通过正式契约时输出 `CLOSE_ALREADY_FRESH` 且不调用生成器；missing/stale/invalid 时使用完整日线 recovery，验证、提交并重新读取远端，成功输出 `CLOSE_RECOVERED`，否则以 `CLOSE_RECOVERY_FAILED` 结束。多个 watchdog 是独立恢复机会，不是无条件重复生成任务。
+
 三个正式阶段统一使用 `scripts/portfolio_snapshot_readiness.py`。workflow 先由 nominal cron slot 解析目标业务日期，再计算期望 `data_date`，不会再用 runner 实际启动日期代替任务日期。fresh 时三阶段都跳过 generator 和 commit；missing/stale/invalid 时才进入阶段 gate、生成、contract validator 和提交。premarket/midday 严重迟到会明确失败，绝不使用下午或收盘行情补上午快照。
 
 close 的期望 `data_date` 是 nominal slot 对应时点“最近一个已经完成收盘的 A 股交易日”。例如周五任务延迟到周六 02:00，仍补周五：顶层 `generation_mode: "recovery"`，所有证券和基准只来自周五完整日线，`generated_at` 是真实周六时间。周一早上若 close 仍停留在上周四，则相对最近完成的上周五为 stale，允许 recovery；当前自然日非交易日不再直接阻止补齐。
@@ -107,6 +109,8 @@ close 的期望 `data_date` 是 nominal slot 对应时点“最近一个已经�
 `workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动运行不会等待，直接由 Python 的真实时间窗口保护；`intraday` 不增加 cron。
 
 concurrency 按 phase 隔离：同 phase 的 primary/fallback 串行，不同 phase 互不阻塞。每个 job 在 readiness 前先 fast-forward 到远端最新分支，commit 前再次检查远端同 phase freshness；提交只 stage 当前 phase JSON，并在 `pull --rebase` 后最多尝试 push 三次。远端已由另一个任务写入合法 snapshot 时 no-op，不覆盖或重复提交。
+
+正常 close 与 close watchdog 使用同一个 `portfolio-market-data-${ref}-close` concurrency group，因此即使正常任务和 watchdog 同时获得 runner，也会串行执行；后获得执行权的一方会再次检查远端 freshness。watchdog 的 nominal cron 日期决定目标交易日，所以周一的 20:17 任务即使延迟到周二凌晨，仍只会尝试补周一完整日线，不会因 runner 的自然日期改变目标。
 
 每次 workflow 都在 Step Summary 记录 nominal schedule slot、目标业务日期、期望 `data_date`、cutoff、实际北京时间、lateness minutes、当前 snapshot、readiness、generation mode、validator、git diff、commit 及最终远端 freshness。这可以区分“GitHub 未创建 run”、“scheduler 严重迟到错过窗口”、“run 触发但快照已新鲜”、“生成失败”、“契约失败”和“push 失败”。
 
@@ -170,3 +174,4 @@ PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.g
 - 阶段窗口只保护报告语义，不判断上游免费源是否延迟；是否可用仍应结合 `provider_timestamp`、`freshness_status` 和 `status` 判断。
 - workflow 向当前分支提交 JSON；若目标分支保护规则禁止 GitHub Actions 直接推送，需要仓库管理员允许该 bot，或改为由独立 PR 接收快照更新。
 - 多 cron 能降低单次 scheduled event 被 dropped 的风险，但 GitHub Scheduler 仍可能同时延迟或丢弃多个 event；仓库代码无法承诺绝对准时。premarket/midday 一旦所有 fallback 都晚于业务 cutoff，只能明确失败，不能事后伪造时点快照。
+- close watchdog 将恢复判断从“某个 close cron 是否准时”改成“目标交易日的合法 close 是否已存在”，但 GitHub 仍可能同时丢弃主 workflow 和全部 watchdog event；此时只能通过 `workflow_dispatch phase=close` 或手动触发 watchdog 恢复。

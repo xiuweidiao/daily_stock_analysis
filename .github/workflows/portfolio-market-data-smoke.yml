@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/requirements-portfolio-pipeline.txt'
       - '.github/workflows/portfolio-market-data*.yml'
+      - '.github/workflows/portfolio-close-watchdog.yml'
       - 'scripts/portfolio_*.py'
       - 'data_provider/**'
       - 'src/**'
@@ -37,4 +38,5 @@ jobs:
           python scripts/portfolio_market_data.py --help
           python scripts/portfolio_premarket_readiness.py --help
           python scripts/portfolio_close_readiness.py --help
+          python scripts/portfolio_close_watchdog.py --help
           python scripts/validate_portfolio_snapshot.py --help

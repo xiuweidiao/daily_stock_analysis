@@ -25,11 +25,22 @@ CLOSE_CRONS = (
     "43 8 * * 1-5",
     "3 9 * * 1-5",
 )
+WATCHDOG_CLOSE_CRONS = (
+    "17 8 * * 1-5",
+    "17 9 * * 1-5",
+    "17 10 * * 1-5",
+    "17 11 * * 1-5",
+    "17 12 * * 1-5",
+)
 SCHEDULE_PHASES = {
     **{cron: "premarket" for cron in PREMARKET_CRONS},
     **{cron: "midday" for cron in MIDDAY_CRONS},
     **{cron: "close" for cron in CLOSE_CRONS},
 }
+WATCHDOG_SCHEDULE_PHASES = {
+    cron: "close" for cron in WATCHDOG_CLOSE_CRONS
+}
+ALL_SCHEDULE_PHASES = {**SCHEDULE_PHASES, **WATCHDOG_SCHEDULE_PHASES}
 
 
 def resolve_phase(schedule: str | None, manual_phase: str | None = None) -> str:
@@ -38,7 +49,7 @@ def resolve_phase(schedule: str | None, manual_phase: str | None = None) -> str:
             raise ValueError(f"unsupported manual phase: {manual_phase}")
         return manual_phase
     try:
-        return SCHEDULE_PHASES[schedule or ""]
+        return ALL_SCHEDULE_PHASES[schedule or ""]
     except KeyError as exc:
         raise ValueError(f"unknown portfolio schedule: {schedule!r}") from exc
 
