@@ -902,14 +902,30 @@ def build_payload(
         current = current.astimezone(SHANGHAI_TZ)
     if generation_mode not in {"live", "recovery"}:
         raise ValueError("generation_mode must be live or recovery")
-    if generation_mode == "recovery" and phase != "close":
-        raise ValueError("recovery generation_mode is only valid for close")
+    if generation_mode == "recovery" and phase not in {"premarket", "close"}:
+        raise ValueError(
+            "recovery generation_mode is only valid for premarket or close"
+        )
     if generation_mode == "recovery":
         if expected_data_date is None:
-            raise ValueError("close recovery requires expected_data_date")
+            raise ValueError(f"{phase} recovery requires expected_data_date")
         if not is_market_open("cn", expected_data_date):
-            raise PhaseTimeError("close recovery target must be an A-share trading day")
-        if current < datetime.combine(expected_data_date, time(15, 0), SHANGHAI_TZ):
+            raise PhaseTimeError(
+                f"{phase} recovery target must be an A-share trading day"
+            )
+        if phase == "premarket":
+            target_reference = datetime.combine(
+                current.date(), time(8, 0), SHANGHAI_TZ
+            )
+            completed_date = _phase_data_date("premarket", target_reference)
+            if expected_data_date != completed_date:
+                raise PhaseTimeError(
+                    "premarket recovery expected_data_date must be the latest "
+                    f"completed A-share trading day ({completed_date})"
+                )
+        elif current < datetime.combine(
+            expected_data_date, time(15, 0), SHANGHAI_TZ
+        ):
             raise PhaseTimeError("close recovery cannot run before the target session closes")
     elif not allow_phase_time_override:
         validate_phase_time(phase, current)
@@ -952,7 +968,7 @@ def build_payload(
         "benchmarks": benchmarks,
         "errors": errors,
     }
-    if phase == "close":
+    if phase == "close" or generation_mode == "recovery":
         payload["generation_mode"] = generation_mode
     return payload
 

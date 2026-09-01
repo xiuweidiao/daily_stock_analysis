@@ -357,12 +357,18 @@ def test_litellm_openai_prompt_cache_key_is_not_passed_through_without_verified_
         import json
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
+        from types import SimpleNamespace
 
         try:
             import litellm
         except ModuleNotFoundError:
             print("LITELLM_MISSING")
             raise SystemExit(77)
+
+        from src.llm.provider_cache import (
+            ProviderCacheRouteContext,
+            apply_prompt_cache_hints,
+        )
 
         captured = {}
         request_seen = threading.Event()
@@ -404,15 +410,31 @@ def test_litellm_openai_prompt_cache_key_is_not_passed_through_without_verified_
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            hint_result = apply_prompt_cache_hints(
+                {
+                    "model": "openai/test-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+                ProviderCacheRouteContext(
+                    model="openai/test-model",
+                    provider="openai",
+                    api_surface="chat_completions",
+                ),
+                SimpleNamespace(
+                    llm_prompt_cache_hints_enabled=True,
+                    llm_prompt_cache_diagnostics_level="off",
+                ),
+            )
+            if "prompt_cache_key" in hint_result.call_kwargs:
+                raise AssertionError("unverified route emitted prompt_cache_key")
+
             litellm.completion(
-                model="openai/test-model",
                 api_base=f"http://127.0.0.1:{server.server_port}/v1",
                 api_key="sk-test",
-                messages=[{"role": "user", "content": "hello"}],
-                prompt_cache_key="cache-key",
                 max_tokens=1,
                 timeout=5,
                 num_retries=0,
+                **hint_result.call_kwargs,
             )
             if not request_seen.wait(timeout=10):
                 raise AssertionError("LiteLLM did not send request to local capture server")

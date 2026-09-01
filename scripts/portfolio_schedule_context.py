@@ -101,8 +101,13 @@ def build_schedule_context(
     phase: str,
     current: datetime,
     schedule: str | None = None,
+    event_name: str | None = None,
 ) -> ScheduleContext:
     """Separate nominal task date, expected market date and actual start time."""
+    if event_name not in {None, "schedule", "workflow_dispatch"}:
+        raise ValueError(f"unsupported workflow event: {event_name!r}")
+    if event_name == "workflow_dispatch" and schedule:
+        raise ValueError("workflow_dispatch cannot include a schedule expression")
     current_cn = as_shanghai_time(current)
     if schedule:
         resolved_phase = resolve_phase(schedule)
@@ -127,6 +132,9 @@ def build_schedule_context(
         if not target_is_trading_day:
             can_generate = False
             reason = "non_trading_day"
+        elif event_name == "workflow_dispatch":
+            generation_mode = "recovery"
+            reason = "MANUAL_RECOVERY"
         elif current_cn.date() != target_date or current_cn > cutoff_at:
             can_generate = False
             reason = "SCHEDULE_MISSED_PHASE_WINDOW"
@@ -193,6 +201,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--phase", choices=("premarket", "midday", "close", "intraday"), required=True
     )
     parser.add_argument("--schedule")
+    parser.add_argument(
+        "--event-name", choices=("schedule", "workflow_dispatch")
+    )
     parser.add_argument("--now", help="ISO-8601 test/diagnostic clock")
     return parser.parse_args(argv)
 
@@ -201,7 +212,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     current = datetime.fromisoformat(args.now) if args.now else datetime.now(SHANGHAI_TZ)
     context = build_schedule_context(
-        phase=args.phase, current=current, schedule=args.schedule or None
+        phase=args.phase,
+        current=current,
+        schedule=args.schedule or None,
+        event_name=args.event_name,
     )
     print(json.dumps(context.as_dict(), ensure_ascii=False, separators=(",", ":")))
     _write_github_output(context)

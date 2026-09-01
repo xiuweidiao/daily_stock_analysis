@@ -88,25 +88,41 @@ def validate_snapshot_contract(
     mode = generation_mode or str(payload.get("generation_mode") or "live")
     if mode not in {"live", "recovery"}:
         raise SnapshotContractError("generation_mode must be live or recovery")
-    if phase != "close" and mode != "live":
-        raise SnapshotContractError("recovery generation_mode is only valid for close")
+    if phase not in {"premarket", "close"} and mode != "live":
+        raise SnapshotContractError(
+            "recovery generation_mode is only valid for premarket or close"
+        )
     payload_mode = str(payload.get("generation_mode") or "live")
     if (
         generation_mode is not None
-        and phase == "close"
+        and phase in {"premarket", "close"}
         and payload_mode != generation_mode
     ):
         raise SnapshotContractError(
             f"generation_mode must be {generation_mode}, got {payload_mode!r}"
         )
     expected_date = expected_data_date or _phase_data_date(phase, generated_at)
-    if mode == "recovery":
+    if mode == "recovery" and phase == "close":
         earliest_recovery = datetime.combine(
             expected_date, time(15, 0), SHANGHAI_TZ
         )
         if generated_at < earliest_recovery:
             raise SnapshotContractError(
                 "recovery close generated_at cannot precede the target session close"
+            )
+    elif mode == "recovery" and phase == "premarket":
+        if generated_at.date() != expected_target_date:
+            raise SnapshotContractError(
+                "premarket recovery generated_at is not the target date"
+            )
+        target_reference = datetime.combine(
+            expected_target_date, time(8, 0), SHANGHAI_TZ
+        )
+        latest_completed_date = _phase_data_date("premarket", target_reference)
+        if expected_date != latest_completed_date:
+            raise SnapshotContractError(
+                "premarket recovery expected data_date must be the latest "
+                f"completed A-share trading day ({latest_completed_date})"
             )
     else:
         if generated_at.date() != expected_target_date:

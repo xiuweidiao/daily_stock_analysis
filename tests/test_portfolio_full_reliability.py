@@ -14,7 +14,11 @@ import pytest
 
 from scripts.portfolio_config import PortfolioConfig
 from scripts.portfolio_market_data import BENCHMARKS, build_payload
-from scripts.portfolio_phase_policy import PhaseTimeError, plan_scheduled_phase
+from scripts.portfolio_phase_policy import (
+    PhaseTimeError,
+    plan_scheduled_phase,
+    validate_phase_time,
+)
 from scripts.portfolio_schedule_context import build_schedule_context
 from scripts.portfolio_schedule_map import MIDDAY_CRONS, PREMARKET_CRONS, resolve_phase
 from scripts.portfolio_snapshot_readiness import inspect_snapshot
@@ -111,10 +115,37 @@ def test_premarket_delayed_to_1500_is_explicitly_missed() -> None:
 
     assert context.lateness_minutes == 506
     assert context.reason == "SCHEDULE_MISSED_PHASE_WINDOW"
+    assert context.can_generate is False
+    assert context.generation_mode == "live"
     with pytest.raises(PhaseTimeError, match="SCHEDULE_MISSED_PHASE_WINDOW"):
         plan_scheduled_phase(
             "premarket", current, target_date=date(2026, 8, 28)
         )
+
+
+def test_premarket_live_allows_0830_but_rejects_0921() -> None:
+    validate_phase_time(
+        "premarket", datetime(2026, 9, 1, 8, 30, tzinfo=SHANGHAI)
+    )
+
+    with pytest.raises(PhaseTimeError, match="between 00:00 and 08:50"):
+        validate_phase_time(
+            "premarket", datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI)
+        )
+
+
+def test_manual_premarket_context_after_cutoff_uses_recovery() -> None:
+    context = build_schedule_context(
+        phase="premarket",
+        current=datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI),
+        event_name="workflow_dispatch",
+    )
+
+    assert context.target_date == "2026-09-01"
+    assert context.expected_data_date == "2026-08-31"
+    assert context.can_generate is True
+    assert context.generation_mode == "recovery"
+    assert context.reason == "MANUAL_RECOVERY"
 
 
 @pytest.mark.parametrize("cron", MIDDAY_CRONS[1:])
@@ -262,6 +293,123 @@ class RecoverySources:
         return self.daily.tail(days).copy(), "index_history_fake"
 
 
+def test_premarket_recovery_after_cutoff_uses_previous_completed_daily_bars() -> None:
+    expected_data_date = date(2026, 8, 31)
+    generated_at = datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI)
+    sources = RecoverySources(expected_data_date)
+
+    payload = build_payload(
+        "premarket",
+        sources=sources,
+        portfolio=PORTFOLIO,
+        now=generated_at,
+        expected_data_date=expected_data_date,
+        generation_mode="recovery",
+    )
+
+    assert sources.quote_calls == 0
+    assert payload["generation_mode"] == "recovery"
+    assert payload["generated_at"] == generated_at.isoformat()
+    assert payload["market_phase"] == "premarket"
+    assert payload["data_date"] == "2026-08-31"
+    assert all(
+        stock["source_details"]["realtime"] is None
+        for stock in payload["stocks"]
+    )
+    validate_snapshot_contract(
+        payload,
+        phase="premarket",
+        portfolio=PORTFOLIO,
+        now=generated_at,
+        target_date=date(2026, 9, 1),
+        expected_data_date=expected_data_date,
+        generation_mode="recovery",
+    )
+
+
+def test_premarket_recovery_rejects_wrong_expected_data_date() -> None:
+    with pytest.raises(
+        PhaseTimeError, match="latest completed A-share trading day"
+    ):
+        build_payload(
+            "premarket",
+            sources=RecoverySources(date(2026, 8, 28)),
+            portfolio=PORTFOLIO,
+            now=datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI),
+            expected_data_date=date(2026, 8, 28),
+            generation_mode="recovery",
+        )
+
+
+def test_premarket_recovery_contract_rejects_wrong_payload_data_date() -> None:
+    payload = _payload(
+        "premarket",
+        datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI),
+        date(2026, 8, 28),
+        generation_mode="recovery",
+    )
+
+    with pytest.raises(SnapshotContractError, match="data_date must be 2026-08-31"):
+        validate_snapshot_contract(
+            payload,
+            phase="premarket",
+            portfolio=PORTFOLIO,
+            now=datetime(2026, 9, 1, 9, 22, tzinfo=SHANGHAI),
+            target_date=date(2026, 9, 1),
+            expected_data_date=date(2026, 8, 31),
+            generation_mode="recovery",
+        )
+
+
+@pytest.mark.parametrize(
+    ("generated_at", "data_date", "expected_fresh", "expected_reason"),
+    (
+        (
+            datetime(2026, 8, 31, 7, 7, tzinfo=SHANGHAI),
+            date(2026, 8, 28),
+            False,
+            "stale_snapshot",
+        ),
+        (
+            datetime(2026, 9, 1, 7, 7, tzinfo=SHANGHAI),
+            date(2026, 8, 31),
+            True,
+            "already_fresh",
+        ),
+    ),
+)
+def test_manual_premarket_readiness_is_recovery_only_when_not_fresh(
+    tmp_path: Path,
+    generated_at: datetime,
+    data_date: date,
+    expected_fresh: bool,
+    expected_reason: str,
+) -> None:
+    path = tmp_path / "premarket.json"
+    _write(path, _payload("premarket", generated_at, data_date))
+    context = build_schedule_context(
+        phase="premarket",
+        current=datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI),
+        event_name="workflow_dispatch",
+    )
+
+    result = inspect_snapshot(
+        path,
+        phase="premarket",
+        portfolio=PORTFOLIO,
+        target_date=date.fromisoformat(context.target_date),
+        expected_data_date=date.fromisoformat(context.expected_data_date),
+        generation_mode=context.generation_mode,
+        now=datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI),
+        target_is_trading_day=True,
+    )
+
+    assert result.fresh is expected_fresh
+    assert result.should_generate is (not expected_fresh)
+    assert result.reason == expected_reason
+    assert result.generation_mode == "recovery"
+
+
 def test_close_recovery_uses_only_target_date_daily_bars() -> None:
     target = date(2026, 8, 28)
     sources = RecoverySources(target)
@@ -334,6 +482,19 @@ def test_workflow_has_phase_isolation_and_finite_push_retry() -> None:
     assert "for attempt in 1 2 3" in workflow
     assert "remote_is_fresh" in workflow
     assert "Verify final remote freshness" in workflow
+
+
+def test_workflow_dispatch_premarket_propagates_recovery_mode() -> None:
+    workflow = Path(".github/workflows/portfolio-market-data.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'args=(--phase "$PHASE" --event-name "$EVENT_NAME")' in workflow
+    assert (
+        'if [ "$PHASE" = "close" ] || [ "$PHASE" = "premarket" ]; then'
+        in workflow
+    )
+    assert 'args+=(--generation-mode "$GENERATION_MODE")' in workflow
 
 
 def test_workflow_never_allows_unchanged_stale_formal_snapshot() -> None:
