@@ -1,0 +1,274 @@
+name: Portfolio Close Watchdog
+
+on:
+  schedule:
+    # UTC -> Asia/Shanghai: 16:17, 17:17, 18:17, 19:17, 20:17 Monday-Friday.
+    - cron: '17 8 * * 1-5'
+    - cron: '17 9 * * 1-5'
+    - cron: '17 10 * * 1-5'
+    - cron: '17 11 * * 1-5'
+    - cron: '17 12 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: portfolio-market-data-${{ github.ref }}-close
+  cancel-in-progress: false
+
+jobs:
+  recover_close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCHEDULE_CRON: ${{ github.event.schedule }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/requirements-portfolio-pipeline.txt
+
+      - name: Install token-free market data dependencies
+        run: pip install -r .github/requirements-portfolio-pipeline.txt
+
+      - name: Refresh branch before readiness
+        run: git pull --ff-only origin "$GITHUB_REF_NAME"
+
+      - name: Inspect current close snapshot
+        id: decision
+        run: |
+          args=()
+          if [ -n "$SCHEDULE_CRON" ]; then
+            args+=(--schedule "$SCHEDULE_CRON")
+          fi
+          python scripts/portfolio_close_watchdog.py "${args[@]}"
+
+      - name: Recheck close readiness before recovery
+        id: recheck
+        if: steps.decision.outputs.should_generate == 'true'
+        run: |
+          args=()
+          if [ -n "$SCHEDULE_CRON" ]; then
+            args+=(--schedule "$SCHEDULE_CRON")
+          fi
+          python scripts/portfolio_close_watchdog.py "${args[@]}"
+
+      - name: Recover close snapshot
+        id: generator
+        if: steps.recheck.outputs.should_generate == 'true'
+        env:
+          TARGET_DATE: ${{ steps.recheck.outputs.target_date }}
+        run: |
+          echo "attempted=true" >> "$GITHUB_OUTPUT"
+          if ! python scripts/portfolio_market_data.py \
+            --phase close \
+            --expected-data-date "$TARGET_DATE" \
+            --generation-mode recovery; then
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            echo "CLOSE_RECOVERY_FAILED"
+            exit 1
+          fi
+          echo "result=run" >> "$GITHUB_OUTPUT"
+
+      - name: Validate recovered close contract
+        id: contract
+        if: steps.generator.outputs.attempted == 'true'
+        env:
+          TARGET_DATE: ${{ steps.recheck.outputs.target_date }}
+        run: |
+          snapshot="data/portfolio/close.json"
+          if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
+            echo "git_diff=unchanged" >> "$GITHUB_OUTPUT"
+            readiness="$(python scripts/portfolio_snapshot_readiness.py \
+              --phase close \
+              --target-date "$TARGET_DATE" \
+              --expected-data-date "$TARGET_DATE" \
+              --generation-mode recovery)"
+            if [ "$(printf '%s' "$readiness" | jq -r '.fresh')" = "true" ]; then
+              echo "generated=false" >> "$GITHUB_OUTPUT"
+              echo "validator=pass" >> "$GITHUB_OUTPUT"
+              echo "CLOSE_ALREADY_FRESH"
+              exit 0
+            fi
+            echo "generated=false" >> "$GITHUB_OUTPUT"
+            echo "validator=fail" >> "$GITHUB_OUTPUT"
+            echo "SNAPSHOT_NOT_UPDATED"
+            echo "CLOSE_RECOVERY_FAILED"
+            exit 1
+          fi
+
+          echo "git_diff=changed" >> "$GITHUB_OUTPUT"
+          if ! python scripts/validate_portfolio_snapshot.py \
+            --phase close \
+            --path "$snapshot" \
+            --target-date "$TARGET_DATE" \
+            --expected-data-date "$TARGET_DATE" \
+            --generation-mode recovery; then
+            echo "validator=fail" >> "$GITHUB_OUTPUT"
+            echo "SNAPSHOT_CONTRACT_FAILED"
+            echo "CLOSE_RECOVERY_FAILED"
+            exit 1
+          fi
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+          echo "validator=pass" >> "$GITHUB_OUTPUT"
+
+      - name: Commit recovered close safely
+        id: commit
+        if: steps.contract.outputs.generated == 'true'
+        env:
+          TARGET_DATE: ${{ steps.recheck.outputs.target_date }}
+        run: |
+          snapshot="data/portfolio/close.json"
+          remote_is_fresh() {
+            git fetch origin "$GITHUB_REF_NAME"
+            remote_snapshot="$(mktemp)"
+            if ! git show "origin/${GITHUB_REF_NAME}:${snapshot}" > "$remote_snapshot" 2>/dev/null; then
+              rm -f "$remote_snapshot"
+              return 1
+            fi
+            readiness="$(python scripts/portfolio_snapshot_readiness.py \
+              --phase close \
+              --path "$remote_snapshot" \
+              --target-date "$TARGET_DATE" \
+              --expected-data-date "$TARGET_DATE" \
+              --generation-mode recovery)"
+            rm -f "$remote_snapshot"
+            [ "$(printf '%s' "$readiness" | jq -r '.fresh')" = "true" ]
+          }
+
+          if remote_is_fresh; then
+            echo "result=no-op" >> "$GITHUB_OUTPUT"
+            echo "CLOSE_ALREADY_FRESH"
+            exit 0
+          fi
+
+          git add -- "$snapshot"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git commit -m "chore: recover portfolio close data"; then
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+            echo "CLOSE_RECOVERY_FAILED"
+            exit 1
+          fi
+
+          for attempt in 1 2 3; do
+            if ! git pull --rebase origin "$GITHUB_REF_NAME"; then
+              echo "result=failed" >> "$GITHUB_OUTPUT"
+              echo "CLOSE_RECOVERY_FAILED"
+              exit 1
+            fi
+            if remote_is_fresh; then
+              echo "result=no-op" >> "$GITHUB_OUTPUT"
+              echo "CLOSE_ALREADY_FRESH"
+              exit 0
+            fi
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then
+              echo "result=committed" >> "$GITHUB_OUTPUT"
+              echo "CLOSE_RECOVERED"
+              exit 0
+            fi
+            echo "push attempt $attempt failed; refreshing remote before retry"
+          done
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+          echo "CLOSE_RECOVERY_FAILED"
+          exit 1
+
+      - name: Verify final remote close
+        id: final
+        if: >-
+          success() &&
+          steps.decision.outputs.target_is_trading_day == 'true'
+        env:
+          TARGET_DATE: ${{ steps.decision.outputs.target_date }}
+        run: |
+          git fetch origin "$GITHUB_REF_NAME"
+          remote_snapshot="$(mktemp)"
+          if ! git show "origin/${GITHUB_REF_NAME}:data/portfolio/close.json" > "$remote_snapshot" 2>/dev/null; then
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "CLOSE_RECOVERY_FAILED"
+            exit 1
+          fi
+          readiness="$(python scripts/portfolio_snapshot_readiness.py \
+            --phase close \
+            --path "$remote_snapshot" \
+            --target-date "$TARGET_DATE" \
+            --expected-data-date "$TARGET_DATE" \
+            --generation-mode recovery)"
+          rm -f "$remote_snapshot"
+          printf '%s\n' "$readiness"
+          if [ "$(printf '%s' "$readiness" | jq -r '.fresh')" != "true" ]; then
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "CLOSE_RECOVERY_FAILED"
+            exit 1
+          fi
+          echo "fresh=true" >> "$GITHUB_OUTPUT"
+          echo "generated_at=$(printf '%s' "$readiness" | jq -r '.generated_at // ""')" >> "$GITHUB_OUTPUT"
+          echo "data_date=$(printf '%s' "$readiness" | jq -r '.data_date // ""')" >> "$GITHUB_OUTPUT"
+
+      - name: Write close watchdog summary
+        if: always()
+        env:
+          TARGET_DATE: ${{ steps.decision.outputs.target_date }}
+          CURRENT_TIME: ${{ steps.decision.outputs.current_beijing_time }}
+          CURRENT_GENERATED_AT: ${{ steps.decision.outputs.generated_at }}
+          CURRENT_DATA_DATE: ${{ steps.decision.outputs.data_date }}
+          CURRENT_MARKET_PHASE: ${{ steps.decision.outputs.market_phase }}
+          CURRENT_PORTFOLIO_STATUS: ${{ steps.decision.outputs.portfolio_status }}
+          READINESS: ${{ steps.decision.outputs.readiness }}
+          READINESS_REASON: ${{ steps.decision.outputs.reason }}
+          TARGET_IS_TRADING_DAY: ${{ steps.decision.outputs.target_is_trading_day }}
+          RECOVERY_ATTEMPTED: ${{ steps.generator.outputs.attempted }}
+          GENERATOR_RESULT: ${{ steps.generator.outputs.result }}
+          VALIDATOR_RESULT: ${{ steps.contract.outputs.validator }}
+          GIT_DIFF_RESULT: ${{ steps.contract.outputs.git_diff }}
+          COMMIT_RESULT: ${{ steps.commit.outputs.result }}
+          FINAL_FRESH: ${{ steps.final.outputs.fresh }}
+          FINAL_GENERATED_AT: ${{ steps.final.outputs.generated_at }}
+          FINAL_DATA_DATE: ${{ steps.final.outputs.data_date }}
+        run: |
+          if [ "$TARGET_IS_TRADING_DAY" = "false" ]; then
+            final_result="NON_TRADING_DAY"
+          elif [ "${{ steps.decision.outputs.fresh }}" = "true" ]; then
+            final_result="CLOSE_ALREADY_FRESH"
+          elif [ "$FINAL_FRESH" = "true" ]; then
+            final_result="CLOSE_RECOVERED"
+          else
+            final_result="CLOSE_RECOVERY_FAILED"
+          fi
+
+          {
+            echo "## Portfolio Close Watchdog"
+            echo
+            echo "Beijing time: ${CURRENT_TIME:-unavailable}"
+            echo "Schedule expression: ${SCHEDULE_CRON:-manual}"
+            echo "Target trading date: ${TARGET_DATE:-unavailable}"
+            echo
+            echo "Current close:"
+            echo "- generated_at: ${CURRENT_GENERATED_AT:-unavailable}"
+            echo "- data_date: ${CURRENT_DATA_DATE:-unavailable}"
+            echo "- market_phase: ${CURRENT_MARKET_PHASE:-unavailable}"
+            echo "- portfolio_status: ${CURRENT_PORTFOLIO_STATUS:-unavailable}"
+            echo
+            echo "Readiness: ${READINESS:-not-checked}"
+            echo "Reason: ${READINESS_REASON:-not-checked}"
+            echo "Recovery attempted: ${RECOVERY_ATTEMPTED:-false}"
+            echo "Generator result: ${GENERATOR_RESULT:-skipped}"
+            echo "Validator: ${VALIDATOR_RESULT:-skipped}"
+            echo "Git diff: ${GIT_DIFF_RESULT:-unchanged}"
+            echo "Commit: ${COMMIT_RESULT:-no-op}"
+            echo
+            echo "Final remote: ${FINAL_FRESH:-not-checked}"
+            echo "Final generated_at: ${FINAL_GENERATED_AT:-unavailable}"
+            echo "Final data_date: ${FINAL_DATA_DATE:-unavailable}"
+            echo "Final result: ${final_result}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$final_result"
