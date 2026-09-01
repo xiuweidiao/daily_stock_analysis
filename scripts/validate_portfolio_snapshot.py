@@ -19,7 +19,12 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from scripts.portfolio_config import DEFAULT_CONFIG_PATH, PortfolioConfig, load_portfolio_config
 from scripts.portfolio_market_data import PHASES, TIMEZONE_NAME, _phase_data_date
-from scripts.portfolio_phase_policy import SHANGHAI_TZ, PhaseTimeError, validate_phase_time
+from scripts.portfolio_phase_policy import (
+    PREMARKET_RECOVERY_END,
+    SHANGHAI_TZ,
+    PhaseTimeError,
+    validate_phase_time,
+)
 from src.core.trading_calendar import is_market_open
 
 
@@ -114,6 +119,14 @@ def validate_snapshot_contract(
         if generated_at.date() != expected_target_date:
             raise SnapshotContractError(
                 "premarket recovery generated_at is not the target date"
+            )
+        recovery_cutoff = datetime.combine(
+            expected_target_date, PREMARKET_RECOVERY_END, SHANGHAI_TZ
+        )
+        if generated_at >= recovery_cutoff:
+            raise SnapshotContractError(
+                "premarket recovery generated_at must be before 09:25 "
+                "Asia/Shanghai"
             )
         target_reference = datetime.combine(
             expected_target_date, time(8, 0), SHANGHAI_TZ

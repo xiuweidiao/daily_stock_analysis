@@ -9,12 +9,12 @@
 
 四个阶段的语义互不替代，正式文件只能在对应北京时间窗口写入：
 
-- `premarket`：`00:00 <= time <= 08:50`；
+- `premarket` live：`00:00 <= time <= 08:50`；stale/missing/invalid 时可在当日 `09:25` 前切换为只读上一完成交易日日线的 `recovery`；
 - `midday`：`11:30 <= time < 13:00`；
 - `close` live：`15:00 <= time < 18:00`；若 scheduled run 严重迟到，允许以 `recovery` 模式在窗口后补齐最近一个已完成交易日；
 - `intraday`：`09:30 <= time <= 11:30` 或 `13:00 <= time < 15:00`。
 
-premarket/midday 的 scheduled run 在窗口外会返回 `PhaseTimeError`，不会新建或覆盖正式 JSON。两个受控例外都只能读取完整日线：`workflow_dispatch phase=premarket` 在快照 stale/missing/invalid 时以 `recovery` 模式补齐目标日的最近已完成交易日；close recovery 补齐目标收盘日。两者的 `generated_at` 均保留真实补齐时间，不读取实时行情，也不伪造生成时间。采集脚本可在盘中运行，但不会把盘中数据写入 `close.json`。
+cron slot 只标识 phase、目标业务日期并计算 lateness，不再决定任务是否还能执行。workflow 先检查 freshness；stale/missing/invalid 时再按 phase recovery window 决策。premarket 在 `08:50` 后、`09:25` 前强制使用上一完成交易日完整日线 recovery；midday 只允许 `11:30 <= time < 13:00`；close 从目标交易日 `15:05` 起保持可恢复。超出有截止时间的语义窗口统一返回 `RECOVERY_WINDOW_EXPIRED`，不会新建或覆盖正式 JSON。recovery 的 `generated_at` 保留真实补齐时间，不读取实时行情，也不伪造生成时间。
 
 ## 持仓与关注配置
 
@@ -93,26 +93,28 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 
 独立 workflow `.github/workflows/portfolio-market-data.yml` 使用 UTC cron，对应北京时间：
 
-- `22:37 / 23:07 / 23:37 UTC` 周日至周四 = 次日 `06:37 / 07:07 / 07:37 Asia/Shanghai` 周一至周五：premarket 主任务与两次独立补偿（均在 `08:50` 窗口内）
-- `02:53 / 03:07 / 03:21 UTC` = `10:53 / 11:07 / 11:21 Asia/Shanghai`：midday 主任务与两次独立补偿；任一任务在 `11:32` 前启动时等待，`11:32 <= time < 13:00` 立即生成，已有 fresh snapshot 时幂等退出，`13:00` 后输出 `SCHEDULE_MISSED_PHASE_WINDOW` 并失败
+- `22:37 / 23:07 / 23:37 UTC` 周日至周四 = 次日 `06:37 / 07:07 / 07:37 Asia/Shanghai` 周一至周五：premarket 主任务与两次独立唤醒；若 runner 在 `08:50` 后才启动但仍早于 `09:25`，自动切换完整日线 recovery
+- `03:35 / 03:50 / 04:10 UTC` = `11:35 / 11:50 / 12:10 Asia/Shanghai`：midday 三次独立唤醒；fresh 时 no-op，stale/missing/invalid 且仍在 `11:30 <= time < 13:00` 时立即生成，`13:00` 后输出 `RECOVERY_WINDOW_EXPIRED` 并失败
 - `06:23 UTC` = `14:23 Asia/Shanghai`：close 主任务，在 `15:05` 前启动时等待至 `15:05`
 - `07:43 / 08:43 / 09:03 UTC` = `15:43 / 16:43 / 17:03 Asia/Shanghai`：close 三次自动补偿
 
 独立 workflow `.github/workflows/portfolio-close-watchdog.yml` 不依赖上述 close run 是否曾被 GitHub 创建。它在北京时间 `16:17 / 17:17 / 18:17 / 19:17 / 20:17`（UTC `08:17 / 09:17 / 10:17 / 11:17 / 12:17`）执行状态驱动检查：目标日期不是交易日时输出 `NON_TRADING_DAY`；远端 close 已通过正式契约时输出 `CLOSE_ALREADY_FRESH` 且不调用生成器；missing/stale/invalid 时使用完整日线 recovery，验证、提交并重新读取远端，成功输出 `CLOSE_RECOVERED`，否则以 `CLOSE_RECOVERY_FAILED` 结束。多个 watchdog 是独立恢复机会，不是无条件重复生成任务。
 
-三个正式阶段统一使用 `scripts/portfolio_snapshot_readiness.py`。workflow 先由 nominal cron slot 解析目标业务日期，再计算期望 `data_date`，不会再用 runner 实际启动日期代替任务日期。fresh 时三阶段都跳过 generator 和 commit；missing/stale/invalid 时才进入阶段 gate、生成、contract validator 和提交。premarket/midday 严重迟到会明确失败，绝不使用下午或收盘行情补上午快照。
+三个正式阶段统一使用 `scripts/portfolio_snapshot_readiness.py`。workflow 先由 nominal cron slot 解析目标业务日期，再计算期望 `data_date`，不会再用 runner 实际启动日期代替任务日期。fresh 时三阶段都跳过 generator 和 commit；missing/stale/invalid 时进入 recovery-window gate、生成、contract validator 和提交。premarket/midday 只有超过各自数据语义截止才以 `RECOVERY_WINDOW_EXPIRED` 失败，不再因为错过 nominal cron slot 失败。
 
 close 的期望 `data_date` 是 nominal slot 对应时点“最近一个已经完成收盘的 A 股交易日”。例如周五任务延迟到周六 02:00，仍补周五：顶层 `generation_mode: "recovery"`，所有证券和基准只来自周五完整日线，`generated_at` 是真实周六时间。周一早上若 close 仍停留在上周四，则相对最近完成的上周五为 stale，允许 recovery；当前自然日非交易日不再直接阻止补齐。
 
 新生成的快照仍必须通过“本次执行 30 分钟内”的严格 validator：顶层不得有未解决 `errors`；每只持仓/关注证券的 `latest_price`、`prev_close`、`open`、`high`、`low`、`volume`、`amount` 必须为有限数值，并满足正价格、`high >= low`、成交量/成交额非负。历史不足导致技术指标为 `null` 仍允许以 `partial` 通过，这与核心行情缺失是两个不同契约。recovery 额外要求证券/基准 `data_date` 等于目标交易日，且证券 `source_details.realtime` 必须为 `null`。生成器执行后若文件无 diff，系统重新检查 freshness；仍不 fresh 时输出 `SNAPSHOT_NOT_UPDATED` 并失败，三个正式 phase 不再有绿色特判。
 
-`workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动 premarket 先做 readiness：fresh 时 no-op；stale/missing/invalid 时进入 `recovery`，即使已过 08:50 也可用目标日前一个已完成交易日的完整日线补齐。scheduled premarket 仍严格受 08:50 截止保护；midday/intraday 的原有时间语义不变，`intraday` 不增加 cron。
+`workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动 premarket 先做 readiness：fresh 时 no-op；stale/missing/invalid 且当日早于 `09:25` 时进入 `recovery`，使用目标日前一个已完成交易日的完整日线补齐。scheduled premarket 使用同一 recovery policy；midday/intraday 的原有数据时间语义不变，`intraday` 不增加 cron。
 
 concurrency 按 phase 隔离：同 phase 的 primary/fallback 串行，不同 phase 互不阻塞。每个 job 在 readiness 前先 fast-forward 到远端最新分支，commit 前再次检查远端同 phase freshness；提交只 stage 当前 phase JSON，并在 `pull --rebase` 后最多尝试 push 三次。远端已由另一个任务写入合法 snapshot 时 no-op，不覆盖或重复提交。
 
 正常 close 与 close watchdog 使用同一个 `portfolio-market-data-${ref}-close` concurrency group，因此即使正常任务和 watchdog 同时获得 runner，也会串行执行；后获得执行权的一方会再次检查远端 freshness。watchdog 的 nominal cron 日期决定目标交易日，所以周一的 20:17 任务即使延迟到周二凌晨，仍只会尝试补周一完整日线，不会因 runner 的自然日期改变目标。
 
-每次 workflow 都在 Step Summary 记录 nominal schedule slot、目标业务日期、期望 `data_date`、cutoff、实际北京时间、lateness minutes、当前 snapshot、readiness、generation mode、validator、git diff、commit 及最终远端 freshness。这可以区分“GitHub 未创建 run”、“scheduler 严重迟到错过窗口”、“run 触发但快照已新鲜”、“生成失败”、“契约失败”和“push 失败”。
+每次 workflow 都在 Step Summary 记录 nominal schedule slot、目标业务日期、期望 `data_date`、实际北京时间、lateness minutes、recovery window 起止及是否在窗口内、当前 snapshot、readiness、should_generate、generation mode、validator、git diff、commit、最终远端 freshness 和最终状态码。这可以区分“GitHub 未创建 run”、“recovery window 已过”、“run 触发但快照已新鲜”、“生成失败”、“契约失败”和“push 失败”。
+
+正式链路使用明确状态码：`SNAPSHOT_ALREADY_FRESH`、`RECOVERY_REQUIRED`、`RECOVERY_WINDOW_EXPIRED`、`SNAPSHOT_GENERATED`、`GENERATION_FAILED`、`SNAPSHOT_CONTRACT_FAILED`、`REMOTE_SNAPSHOT_ALREADY_FRESH`、`FINAL_SNAPSHOT_NOT_FRESH`、`NON_TRADING_DAY`。`SCHEDULE_MISSED_PHASE_WINDOW` 不再参与生成决策。
 
 新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、当日 `generated_at`、阶段时间窗口、`data_date`、持仓/关注列表与 `config/portfolio.json` 及 `tracking_type` 都必须一致。配置证券池非空时 `stocks` 不得整体缺失。交易日判断跳过、未生成新文件或契约失败时，日志输出 `current snapshot unavailable`，不会把旧 JSON commit 成当日成功。
 
@@ -132,7 +134,7 @@ python scripts/check_portfolio_snapshot_ready.py --phase close
 
 推荐读取与重试策略：
 
-- premarket：08:00 后开始读取；未 ready 时每 5 分钟重试，最晚到 08:50；
+- premarket：08:00 后开始读取；未 ready 时每 5 分钟重试，最晚到 09:25；
 - midday：建议 11:45 开始读取；未 ready 时每 5 分钟重试，最晚到 12:15；
 - close：建议 15:25 开始读取；未 ready 时每 5 分钟重试，最晚到 16:00。
 

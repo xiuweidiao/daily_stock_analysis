@@ -39,6 +39,7 @@ class SnapshotReadiness:
     fresh: bool
     should_generate: bool
     reason: str
+    state_code: str
     freshness: str
     generated_at: str | None
     data_date: str | None
@@ -75,11 +76,18 @@ def _result(
     current: datetime,
     generation_mode: str,
 ) -> SnapshotReadiness:
+    if fresh:
+        state_code = "SNAPSHOT_ALREADY_FRESH"
+    elif reason == "non_trading_day":
+        state_code = "NON_TRADING_DAY"
+    else:
+        state_code = "RECOVERY_REQUIRED"
     return SnapshotReadiness(
         phase=phase,
         fresh=fresh,
         should_generate=should_generate,
         reason=reason,
+        state_code=state_code,
         freshness="fresh" if fresh else (
             "stale" if reason in {"missing_snapshot", "stale_snapshot"} else "invalid"
         ),

@@ -6,10 +6,10 @@ on:
     - cron: '37 22 * * 0-4'
     - cron: '07 23 * * 0-4'
     - cron: '37 23 * * 0-4'
-    # UTC -> Asia/Shanghai: 10:53, 11:07, 11:21 Monday-Friday.
-    - cron: '53 2 * * 1-5'
-    - cron: '07 3 * * 1-5'
-    - cron: '21 3 * * 1-5'
+    # UTC -> Asia/Shanghai: 11:35, 11:50, 12:10 Monday-Friday.
+    - cron: '35 3 * * 1-5'
+    - cron: '50 3 * * 1-5'
+    - cron: '10 4 * * 1-5'
     # UTC -> Asia/Shanghai: 14:23, 15:43, 16:43, 17:03 Monday-Friday.
     - cron: '23 6 * * 1-5'
     - cron: '43 7 * * 1-5'
@@ -127,10 +127,10 @@ jobs:
           fi
           echo "should_generate=$should_generate" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for scheduled market target
+      - name: Wait for phase recovery window
         id: gate
         if: >-
-          github.event_name == 'schedule' &&
+          env.PHASE != 'intraday' &&
           steps.decision.outputs.should_generate == 'true'
         env:
           TARGET_DATE: ${{ steps.context.outputs.target_date }}
@@ -140,17 +140,23 @@ jobs:
           LATENESS_MINUTES: ${{ steps.context.outputs.lateness_minutes }}
           CUTOFF: ${{ steps.context.outputs.cutoff }}
         run: |
-          if ! python scripts/portfolio_phase_gate.py \
+          set +e
+          gate_output="$(python scripts/portfolio_phase_gate.py \
             --phase "$PHASE" \
             --target-date "$TARGET_DATE" \
             --expected-data-date "$EXPECTED_DATA_DATE" \
-            --generation-mode "$GENERATION_MODE"; then
+            --generation-mode "$GENERATION_MODE")"
+          gate_rc=$?
+          set -e
+          printf '%s\n' "$gate_output"
+          if [ "$gate_rc" -ne 0 ]; then
+            gate_state="$(printf '%s\n' "$gate_output" | tail -n 1)"
             echo "phase=$PHASE"
             echo "expected_slot=$EXPECTED_SLOT"
             echo "actual_start=$(TZ=Asia/Shanghai date --iso-8601=seconds)"
             echo "lateness=${LATENESS_MINUTES}m"
             echo "cutoff=${CUTOFF:-none}"
-            echo "result=SCHEDULE_MISSED_PHASE_WINDOW"
+            echo "result=${gate_state:-PHASE_GATE_FAILED}"
             exit 1
           fi
 
@@ -184,7 +190,7 @@ jobs:
           if [ "$PHASE" != "intraday" ]; then
             args+=(--expected-data-date "$EXPECTED_DATA_DATE")
           fi
-          if [ "$PHASE" = "close" ] || [ "$PHASE" = "premarket" ]; then
+          if [ "$PHASE" != "intraday" ]; then
             args+=(--generation-mode "$GENERATION_MODE")
           fi
           if ! python scripts/portfolio_market_data.py "${args[@]}"; then
@@ -348,12 +354,17 @@ jobs:
           LATENESS_MINUTES: ${{ steps.context.outputs.lateness_minutes }}
           GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
           CONTEXT_REASON: ${{ steps.context.outputs.reason }}
+          RECOVERY_WINDOW_START: ${{ steps.context.outputs.recovery_window_start }}
+          RECOVERY_WINDOW_END: ${{ steps.context.outputs.recovery_window_end }}
+          INSIDE_RECOVERY_WINDOW: ${{ steps.context.outputs.inside_recovery_window }}
+          SHOULD_GENERATE: ${{ steps.decision.outputs.should_generate }}
           CURRENT_GENERATED_AT: ${{ steps.readiness.outputs.generated_at }}
           CURRENT_DATA_DATE: ${{ steps.readiness.outputs.data_date }}
           CURRENT_MARKET_PHASE: ${{ steps.readiness.outputs.market_phase }}
           CURRENT_PORTFOLIO_STATUS: ${{ steps.readiness.outputs.portfolio_status }}
           READINESS_FRESHNESS: ${{ steps.readiness.outputs.freshness }}
           READINESS_REASON: ${{ steps.readiness.outputs.reason }}
+          READINESS_STATE_CODE: ${{ steps.readiness.outputs.state_code }}
           GENERATOR_RESULT: ${{ steps.generator.outputs.result }}
           VALIDATOR_RESULT: ${{ steps.contract.outputs.validator }}
           GIT_DIFF_RESULT: ${{ steps.contract.outputs.git_diff }}
@@ -363,6 +374,24 @@ jobs:
           FINAL_GENERATED_AT: ${{ steps.final.outputs.generated_at }}
           FINAL_DATA_DATE: ${{ steps.final.outputs.data_date }}
         run: |
+          if [ "$FINAL_FRESH" = "true" ] && [ "$COMMIT_RESULT" = "committed" ]; then
+            final_state="SNAPSHOT_GENERATED"
+          elif [ "$COMMIT_RESULT" = "no-op" ]; then
+            final_state="REMOTE_SNAPSHOT_ALREADY_FRESH"
+          elif [ "$FINAL_FRESH" = "true" ]; then
+            final_state="SNAPSHOT_ALREADY_FRESH"
+          elif [ "$CONTEXT_REASON" = "NON_TRADING_DAY" ]; then
+            final_state="NON_TRADING_DAY"
+          elif [ "$GATE_STATUS" = "RECOVERY_WINDOW_EXPIRED" ]; then
+            final_state="RECOVERY_WINDOW_EXPIRED"
+          elif [ "$GENERATOR_RESULT" = "failed" ]; then
+            final_state="GENERATION_FAILED"
+          elif [ "$VALIDATOR_RESULT" = "fail" ]; then
+            final_state="SNAPSHOT_CONTRACT_FAILED"
+          else
+            final_state="FINAL_SNAPSHOT_NOT_FRESH"
+          fi
+
           {
             echo "## Portfolio Market Data"
             echo
@@ -392,6 +421,13 @@ jobs:
             echo "- ${READINESS_FRESHNESS:-not-checked}"
             echo "- reason: ${READINESS_REASON:-not-checked}"
             echo "- schedule decision: ${CONTEXT_REASON:-unavailable}"
+            echo "- state code: ${READINESS_STATE_CODE:-not-checked}"
+            echo
+            echo "Recovery window:"
+            echo "- start: ${RECOVERY_WINDOW_START:-unavailable}"
+            echo "- end: ${RECOVERY_WINDOW_END:-open-ended}"
+            echo "- inside recovery window: ${INSIDE_RECOVERY_WINDOW:-false}"
+            echo "- should_generate: ${SHOULD_GENERATE:-false}"
             echo
             echo "Execution:"
             echo "- phase gate: ${GATE_STATUS:-skipped}"
@@ -405,4 +441,7 @@ jobs:
             echo "- snapshot fresh: ${FINAL_FRESH:-false}"
             echo "- final generated_at: ${FINAL_GENERATED_AT:-unavailable}"
             echo "- final data_date: ${FINAL_DATA_DATE:-unavailable}"
+            echo "- final state code: ${final_state}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$final_state"

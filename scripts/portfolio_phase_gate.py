@@ -56,9 +56,13 @@ def main() -> int:
     except PhaseTimeError as exc:
         LOGGER.error("%s", exc)
         status = (
-            "SCHEDULE_MISSED_PHASE_WINDOW"
-            if "SCHEDULE_MISSED_PHASE_WINDOW" in str(exc)
-            else "PHASE_GATE_FAILED"
+            "RECOVERY_WINDOW_EXPIRED"
+            if "RECOVERY_WINDOW_EXPIRED" in str(exc)
+            else (
+                "RECOVERY_REQUIRED"
+                if "RECOVERY_REQUIRED" in str(exc)
+                else "PHASE_GATE_FAILED"
+            )
         )
         print(status)
         _write_status(status)
@@ -75,7 +79,7 @@ def main() -> int:
         time.sleep(plan.wait_seconds)
     else:
         LOGGER.info("%s scheduled run is ready at %s", plan.phase, plan.current.isoformat())
-    _write_status("ready")
+    _write_status("RECOVERY_REQUIRED")
     return 0
 
 

@@ -51,7 +51,7 @@ def test_scheduled_phase_wait_plan(
 @pytest.mark.parametrize(
     ("phase", "started_at"),
     (
-        ("premarket", datetime(2026, 8, 17, 8, 51, tzinfo=SHANGHAI)),
+        ("premarket", datetime(2026, 8, 17, 9, 25, tzinfo=SHANGHAI)),
         ("midday", datetime(2026, 8, 17, 13, 1, tzinfo=SHANGHAI)),
         ("close", datetime(2026, 8, 17, 18, 0, tzinfo=SHANGHAI)),
     ),
@@ -59,8 +59,18 @@ def test_scheduled_phase_wait_plan(
 def test_scheduled_phase_gate_rejects_missed_windows(
     phase: str, started_at: datetime
 ) -> None:
-    with pytest.raises(PhaseTimeError, match="current snapshot unavailable"):
+    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
         plan_scheduled_phase(phase, started_at)
+
+
+def test_premarket_after_live_cutoff_requires_recovery_mode() -> None:
+    started_at = datetime(2026, 8, 17, 9, 0, tzinfo=SHANGHAI)
+
+    with pytest.raises(PhaseTimeError, match="RECOVERY_REQUIRED"):
+        plan_scheduled_phase("premarket", started_at)
+    assert plan_scheduled_phase(
+        "premarket", started_at, generation_mode="recovery"
+    ).wait_seconds == 0
 
 
 def test_scheduled_phase_wait_never_rounds_down_before_target() -> None:
@@ -85,8 +95,16 @@ def test_workflow_crons_convert_to_intended_shanghai_queue_times() -> None:
             datetime(2026, 8, 17, 7, 37, tzinfo=SHANGHAI),
         ),
         (
-            datetime(2026, 8, 17, 2, 53, tzinfo=utc),
-            datetime(2026, 8, 17, 10, 53, tzinfo=SHANGHAI),
+            datetime(2026, 8, 17, 3, 35, tzinfo=utc),
+            datetime(2026, 8, 17, 11, 35, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 17, 3, 50, tzinfo=utc),
+            datetime(2026, 8, 17, 11, 50, tzinfo=SHANGHAI),
+        ),
+        (
+            datetime(2026, 8, 17, 4, 10, tzinfo=utc),
+            datetime(2026, 8, 17, 12, 10, tzinfo=SHANGHAI),
         ),
         (
             datetime(2026, 8, 17, 6, 23, tzinfo=utc),
@@ -362,9 +380,9 @@ def test_workflow_waits_then_validates_before_phase_scoped_commit() -> None:
     )
 
     assert workflow.index("Check snapshot readiness") < workflow.index(
-        "Wait for scheduled market target"
+        "Wait for phase recovery window"
     )
-    assert workflow.index("Wait for scheduled market target") < workflow.index(
+    assert workflow.index("Wait for phase recovery window") < workflow.index(
         "Generate portfolio JSON"
     )
     assert workflow.index("Validate generated snapshot contract") < workflow.index(
