@@ -243,7 +243,7 @@ def test_watchdog_generator_failure_is_red(tmp_path: Path) -> None:
     assert "result=failed" in github_output.read_text(encoding="utf-8")
 
 
-def test_manual_close_after_1800_uses_recovery_without_schedule_gate() -> None:
+def test_manual_close_after_1800_uses_open_ended_recovery_gate() -> None:
     context = build_schedule_context(
         phase="close",
         current=datetime(2026, 8, 31, 18, 20, tzinfo=SHANGHAI),
@@ -254,6 +254,7 @@ def test_manual_close_after_1800_uses_recovery_without_schedule_gate() -> None:
 
     assert context.expected_data_date == "2026-08-31"
     assert context.generation_mode == "recovery"
-    assert "github.event_name == 'schedule'" in workflow
+    assert "Wait for phase recovery window" in workflow
+    assert "env.PHASE != 'intraday'" in workflow
     assert "workflow_dispatch:" in workflow
     assert "- close" in workflow

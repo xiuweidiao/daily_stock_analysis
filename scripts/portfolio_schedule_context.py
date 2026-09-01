@@ -21,7 +21,9 @@ from scripts.portfolio_phase_policy import (
     CLOSE_END,
     CLOSE_TARGET,
     MIDDAY_END,
+    MIDDAY_START,
     PREMARKET_END,
+    PREMARKET_RECOVERY_END,
     SHANGHAI_TZ,
     as_shanghai_time,
 )
@@ -40,6 +42,9 @@ class ScheduleContext:
     current_beijing_time: str
     lateness_minutes: int
     cutoff: str | None
+    recovery_window_start: str
+    recovery_window_end: str | None
+    inside_recovery_window: bool
     generation_mode: str
     can_generate: bool
     reason: str
@@ -124,32 +129,59 @@ def build_schedule_context(
     lateness = max(0, int((current_cn - slot).total_seconds() // 60))
 
     cutoff_at: datetime | None = None
+    recovery_start_at: datetime
+    recovery_end_at: datetime | None
+    inside_recovery_window = False
     generation_mode = "live"
     can_generate = True
     reason = "ready"
     if phase == "premarket":
-        cutoff_at = datetime.combine(target_date, PREMARKET_END, SHANGHAI_TZ)
+        live_cutoff = datetime.combine(target_date, PREMARKET_END, SHANGHAI_TZ)
+        recovery_start_at = datetime.combine(target_date, time(0, 0), SHANGHAI_TZ)
+        recovery_end_at = datetime.combine(
+            target_date, PREMARKET_RECOVERY_END, SHANGHAI_TZ
+        )
+        cutoff_at = recovery_end_at
+        generation_mode = (
+            "recovery"
+            if event_name == "workflow_dispatch" or current_cn > live_cutoff
+            else "live"
+        )
+        inside_recovery_window = (
+            recovery_start_at <= current_cn < recovery_end_at
+        )
         if not target_is_trading_day:
             can_generate = False
-            reason = "non_trading_day"
-        elif event_name == "workflow_dispatch":
-            generation_mode = "recovery"
-            reason = "MANUAL_RECOVERY"
-        elif current_cn.date() != target_date or current_cn > cutoff_at:
+            reason = "NON_TRADING_DAY"
+        elif not inside_recovery_window:
             can_generate = False
-            reason = "SCHEDULE_MISSED_PHASE_WINDOW"
+            reason = "RECOVERY_WINDOW_EXPIRED"
+        elif generation_mode == "recovery":
+            reason = "RECOVERY_REQUIRED"
     elif phase == "midday":
-        cutoff_at = datetime.combine(target_date, MIDDAY_END, SHANGHAI_TZ)
+        recovery_start_at = datetime.combine(
+            target_date, MIDDAY_START, SHANGHAI_TZ
+        )
+        recovery_end_at = datetime.combine(target_date, MIDDAY_END, SHANGHAI_TZ)
+        cutoff_at = recovery_end_at
+        inside_recovery_window = (
+            recovery_start_at <= current_cn < recovery_end_at
+        )
         if not target_is_trading_day:
             can_generate = False
-            reason = "non_trading_day"
-        elif current_cn.date() != target_date or current_cn >= cutoff_at:
+            reason = "NON_TRADING_DAY"
+        elif current_cn.date() != target_date or current_cn >= recovery_end_at:
             can_generate = False
-            reason = "SCHEDULE_MISSED_PHASE_WINDOW"
+            reason = "RECOVERY_WINDOW_EXPIRED"
+        elif current_cn < recovery_start_at:
+            reason = "waiting_for_market_target"
     elif phase == "close":
         expected_close = datetime.combine(
             expected_data_date, CLOSE_TARGET, SHANGHAI_TZ
         )
+        recovery_start_at = expected_close
+        recovery_end_at = None
+        inside_recovery_window = current_cn >= recovery_start_at
         generation_mode = (
             "live"
             if current_cn.date() == expected_data_date
@@ -162,6 +194,9 @@ def build_schedule_context(
             reason = "waiting_for_market_target"
     elif phase == "intraday":
         expected_data_date = current_cn.date()
+        recovery_start_at = current_cn
+        recovery_end_at = current_cn
+        inside_recovery_window = True
     else:
         raise ValueError(f"unsupported phase: {phase}")
 
@@ -175,6 +210,11 @@ def build_schedule_context(
         current_beijing_time=current_cn.isoformat(),
         lateness_minutes=lateness,
         cutoff=cutoff_at.isoformat() if cutoff_at else None,
+        recovery_window_start=recovery_start_at.isoformat(),
+        recovery_window_end=(
+            recovery_end_at.isoformat() if recovery_end_at else None
+        ),
+        inside_recovery_window=inside_recovery_window,
         generation_mode=generation_mode,
         can_generate=can_generate,
         reason=reason,

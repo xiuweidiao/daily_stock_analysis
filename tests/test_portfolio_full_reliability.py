@@ -20,7 +20,12 @@ from scripts.portfolio_phase_policy import (
     validate_phase_time,
 )
 from scripts.portfolio_schedule_context import build_schedule_context
-from scripts.portfolio_schedule_map import MIDDAY_CRONS, PREMARKET_CRONS, resolve_phase
+from scripts.portfolio_schedule_map import (
+    CLOSE_CRONS,
+    MIDDAY_CRONS,
+    PREMARKET_CRONS,
+    resolve_phase,
+)
 from scripts.portfolio_snapshot_readiness import inspect_snapshot
 from scripts.validate_portfolio_snapshot import (
     SnapshotContractError,
@@ -107,19 +112,23 @@ def test_premarket_third_slot_independently_targets_same_business_day() -> None:
     assert resolve_phase(PREMARKET_CRONS[2]) == "premarket"
 
 
-def test_premarket_delayed_to_1500_is_explicitly_missed() -> None:
-    current = datetime(2026, 8, 28, 15, 3, tzinfo=SHANGHAI)
+def test_premarket_delayed_145_minutes_expires_for_data_semantics() -> None:
+    current = datetime(2026, 8, 28, 10, 2, tzinfo=SHANGHAI)
     context = build_schedule_context(
-        phase="premarket", schedule=PREMARKET_CRONS[0], current=current
+        phase="premarket", schedule=PREMARKET_CRONS[2], current=current
     )
 
-    assert context.lateness_minutes == 506
-    assert context.reason == "SCHEDULE_MISSED_PHASE_WINDOW"
+    assert context.lateness_minutes == 145
+    assert context.reason == "RECOVERY_WINDOW_EXPIRED"
     assert context.can_generate is False
-    assert context.generation_mode == "live"
-    with pytest.raises(PhaseTimeError, match="SCHEDULE_MISSED_PHASE_WINDOW"):
+    assert context.generation_mode == "recovery"
+    assert context.inside_recovery_window is False
+    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
         plan_scheduled_phase(
-            "premarket", current, target_date=date(2026, 8, 28)
+            "premarket",
+            current,
+            target_date=date(2026, 8, 28),
+            generation_mode="recovery",
         )
 
 
@@ -134,6 +143,25 @@ def test_premarket_live_allows_0830_but_rejects_0921() -> None:
         )
 
 
+def test_scheduled_premarket_delay_before_0925_switches_to_recovery() -> None:
+    current = datetime(2026, 9, 1, 9, 7, tzinfo=SHANGHAI)
+    context = build_schedule_context(
+        phase="premarket", schedule=PREMARKET_CRONS[1], current=current
+    )
+
+    assert context.lateness_minutes == 120
+    assert context.can_generate is True
+    assert context.inside_recovery_window is True
+    assert context.generation_mode == "recovery"
+    assert context.reason == "RECOVERY_REQUIRED"
+    assert plan_scheduled_phase(
+        "premarket",
+        current,
+        target_date=date(2026, 9, 1),
+        generation_mode="recovery",
+    ).wait_seconds == 0
+
+
 def test_manual_premarket_context_after_cutoff_uses_recovery() -> None:
     context = build_schedule_context(
         phase="premarket",
@@ -145,25 +173,58 @@ def test_manual_premarket_context_after_cutoff_uses_recovery() -> None:
     assert context.expected_data_date == "2026-08-31"
     assert context.can_generate is True
     assert context.generation_mode == "recovery"
-    assert context.reason == "MANUAL_RECOVERY"
+    assert context.reason == "RECOVERY_REQUIRED"
+    assert context.inside_recovery_window is True
 
 
-@pytest.mark.parametrize("cron", MIDDAY_CRONS[1:])
+@pytest.mark.parametrize("cron", MIDDAY_CRONS)
 def test_midday_fallbacks_map_to_midday_and_can_generate(cron: str) -> None:
-    current = datetime(
-        2026,
-        8,
-        28,
-        11,
-        8 if cron == MIDDAY_CRONS[1] else 22,
-        tzinfo=SHANGHAI,
-    )
+    current = datetime(2026, 8, 28, 12, 15, tzinfo=SHANGHAI)
     context = build_schedule_context(phase="midday", schedule=cron, current=current)
 
     assert resolve_phase(cron) == "midday"
     assert context.target_date == "2026-08-28"
     assert context.expected_data_date == "2026-08-28"
     assert context.can_generate is True
+    assert context.inside_recovery_window is True
+
+
+def test_midday_delayed_from_1135_to_1152_still_generates_stale_snapshot(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "midday.json"
+    _write(
+        path,
+        _payload(
+            "midday",
+            datetime(2026, 8, 27, 11, 35, tzinfo=SHANGHAI),
+            date(2026, 8, 27),
+        ),
+    )
+    current = datetime(2026, 8, 28, 11, 52, tzinfo=SHANGHAI)
+    context = build_schedule_context(
+        phase="midday", schedule=MIDDAY_CRONS[0], current=current
+    )
+    result = inspect_snapshot(
+        path,
+        phase="midday",
+        portfolio=PORTFOLIO,
+        target_date=date(2026, 8, 28),
+        expected_data_date=date(2026, 8, 28),
+        generation_mode="live",
+        now=current,
+        target_is_trading_day=True,
+    )
+
+    assert context.expected_slot.endswith("T11:35:00+08:00")
+    assert context.lateness_minutes == 17
+    assert context.can_generate is True
+    assert context.inside_recovery_window is True
+    assert result.should_generate is True
+    assert result.state_code == "RECOVERY_REQUIRED"
+    assert plan_scheduled_phase(
+        "midday", current, target_date=date(2026, 8, 28)
+    ).wait_seconds == 0
 
 
 def test_midday_delayed_to_2200_is_explicitly_missed() -> None:
@@ -173,8 +234,82 @@ def test_midday_delayed_to_2200_is_explicitly_missed() -> None:
         current=datetime(2026, 8, 28, 22, 36, tzinfo=SHANGHAI),
     )
 
-    assert context.reason == "SCHEDULE_MISSED_PHASE_WINDOW"
-    assert context.lateness_minutes == 703
+    assert context.reason == "RECOVERY_WINDOW_EXPIRED"
+    assert context.inside_recovery_window is False
+
+
+def test_midday_stale_at_1320_expires_recovery_window(tmp_path: Path) -> None:
+    path = tmp_path / "midday.json"
+    _write(
+        path,
+        _payload(
+            "midday",
+            datetime(2026, 8, 27, 11, 35, tzinfo=SHANGHAI),
+            date(2026, 8, 27),
+        ),
+    )
+    current = datetime(2026, 8, 28, 13, 20, tzinfo=SHANGHAI)
+    context = build_schedule_context(
+        phase="midday", schedule=MIDDAY_CRONS[2], current=current
+    )
+    readiness = inspect_snapshot(
+        path,
+        phase="midday",
+        portfolio=PORTFOLIO,
+        target_date=date(2026, 8, 28),
+        expected_data_date=date(2026, 8, 28),
+        generation_mode="live",
+        now=current,
+        target_is_trading_day=True,
+    )
+
+    assert readiness.should_generate is True
+    assert context.can_generate is False
+    assert context.reason == "RECOVERY_WINDOW_EXPIRED"
+    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
+        plan_scheduled_phase("midday", current, target_date=date(2026, 8, 28))
+
+
+def test_close_delayed_from_1543_to_1730_still_generates(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "close.json"
+    _write(
+        path,
+        _payload(
+            "close",
+            datetime(2026, 8, 27, 15, 10, tzinfo=SHANGHAI),
+            date(2026, 8, 27),
+            generation_mode="live",
+        ),
+    )
+    current = datetime(2026, 8, 28, 17, 30, tzinfo=SHANGHAI)
+    context = build_schedule_context(
+        phase="close", schedule=CLOSE_CRONS[1], current=current
+    )
+    readiness = inspect_snapshot(
+        path,
+        phase="close",
+        portfolio=PORTFOLIO,
+        target_date=date(2026, 8, 28),
+        expected_data_date=date(2026, 8, 28),
+        generation_mode=context.generation_mode,
+        now=current,
+        target_is_trading_day=True,
+    )
+
+    assert context.expected_slot.endswith("T15:43:00+08:00")
+    assert context.lateness_minutes == 107
+    assert context.inside_recovery_window is True
+    assert context.can_generate is True
+    assert readiness.should_generate is True
+    assert plan_scheduled_phase(
+        "close",
+        current,
+        target_date=date(2026, 8, 28),
+        expected_data_date=date(2026, 8, 28),
+        generation_mode="live",
+    ).wait_seconds == 0
 
 
 def test_friday_close_delayed_to_saturday_keeps_friday_target() -> None:
@@ -251,12 +386,13 @@ def test_midday_fallback_is_idempotent_when_snapshot_is_fresh(tmp_path: Path) ->
             target_date=date(2026, 8, 28),
             expected_data_date=date(2026, 8, 28),
             generation_mode="live",
-            now=datetime(2026, 8, 28, 11, 40, tzinfo=SHANGHAI),
+            now=datetime(2026, 8, 28, 12, 5, tzinfo=SHANGHAI),
             target_is_trading_day=True,
         )
 
     assert result.fresh is True
     assert result.should_generate is False
+    assert result.state_code == "SNAPSHOT_ALREADY_FRESH"
     assert path.read_bytes() == original
 
 
@@ -337,6 +473,18 @@ def test_premarket_recovery_rejects_wrong_expected_data_date() -> None:
             portfolio=PORTFOLIO,
             now=datetime(2026, 9, 1, 9, 21, tzinfo=SHANGHAI),
             expected_data_date=date(2026, 8, 28),
+            generation_mode="recovery",
+        )
+
+
+def test_premarket_recovery_rejects_generated_at_at_deadline() -> None:
+    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
+        build_payload(
+            "premarket",
+            sources=RecoverySources(date(2026, 8, 31)),
+            portfolio=PORTFOLIO,
+            now=datetime(2026, 9, 1, 9, 25, tzinfo=SHANGHAI),
+            expected_data_date=date(2026, 8, 31),
             generation_mode="recovery",
         )
 
@@ -482,6 +630,20 @@ def test_workflow_has_phase_isolation_and_finite_push_retry() -> None:
     assert "for attempt in 1 2 3" in workflow
     assert "remote_is_fresh" in workflow
     assert "Verify final remote freshness" in workflow
+    for diagnostic in (
+        "expected schedule slot",
+        "lateness_minutes",
+        "expected data_date",
+        "Recovery window:",
+        "inside recovery window",
+        "should_generate",
+        "generation mode",
+        "validator",
+        "git diff",
+        "commit",
+        "final state code",
+    ):
+        assert diagnostic in workflow
 
 
 def test_workflow_dispatch_premarket_propagates_recovery_mode() -> None:
@@ -491,7 +653,7 @@ def test_workflow_dispatch_premarket_propagates_recovery_mode() -> None:
 
     assert 'args=(--phase "$PHASE" --event-name "$EVENT_NAME")' in workflow
     assert (
-        'if [ "$PHASE" = "close" ] || [ "$PHASE" = "premarket" ]; then'
+        'if [ "$PHASE" != "intraday" ]; then'
         in workflow
     )
     assert 'args+=(--generation-mode "$GENERATION_MODE")' in workflow
@@ -539,3 +701,41 @@ def test_midday_generator_without_file_change_is_a_red_failure(
     assert result.returncode == 1
     assert "SNAPSHOT_NOT_UPDATED" in result.stdout
     assert "validator=fail" in github_output.read_text(encoding="utf-8")
+
+
+def test_remote_fresh_snapshot_wins_without_duplicate_commit(tmp_path: Path) -> None:
+    github_output = tmp_path / "commit-output"
+    call_log = tmp_path / "git-calls"
+    script = (
+        "git() { printf '%s\\n' \"$*\" >> \"$CALL_LOG\"; "
+        "if [ \"$1\" = show ]; then printf '{}'; fi; return 0; }\n"
+        "python() { printf '%s' '{\"fresh\":true}'; }\n"
+        + _workflow_step_script("Commit updated snapshot safely")
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=Path.cwd(),
+        env={
+            **os.environ,
+            "PHASE": "midday",
+            "TARGET_DATE": "2026-08-28",
+            "EXPECTED_DATA_DATE": "2026-08-28",
+            "GENERATION_MODE": "live",
+            "GITHUB_REF_NAME": "main",
+            "GITHUB_OUTPUT": str(github_output),
+            "CALL_LOG": str(call_log),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "REMOTE_SNAPSHOT_ALREADY_FRESH" in result.stdout
+    assert "result=no-op" in github_output.read_text(encoding="utf-8")
+    calls = call_log.read_text(encoding="utf-8")
+    assert "fetch origin main" in calls
+    assert "add --" not in calls
+    assert "commit -m" not in calls
+    assert "push origin" not in calls

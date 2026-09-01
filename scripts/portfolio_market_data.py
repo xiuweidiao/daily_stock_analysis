@@ -34,6 +34,7 @@ from scripts.portfolio_config import (
 )
 from scripts.portfolio_phase_policy import (
     PhaseTimeError,
+    PREMARKET_RECOVERY_END,
     SHANGHAI_TZ,
     validate_phase_time,
 )
@@ -914,6 +915,14 @@ def build_payload(
                 f"{phase} recovery target must be an A-share trading day"
             )
         if phase == "premarket":
+            recovery_cutoff = datetime.combine(
+                current.date(), PREMARKET_RECOVERY_END, SHANGHAI_TZ
+            )
+            if current >= recovery_cutoff:
+                raise PhaseTimeError(
+                    "RECOVERY_WINDOW_EXPIRED: premarket recovery requires "
+                    "generation before 09:25 Asia/Shanghai"
+                )
             target_reference = datetime.combine(
                 current.date(), time(8, 0), SHANGHAI_TZ
             )
