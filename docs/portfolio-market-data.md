@@ -14,7 +14,7 @@
 - `close` live：`15:00 <= time < 18:00`；若 scheduled run 严重迟到，允许以 `recovery` 模式在窗口后补齐最近一个已完成交易日；
 - `intraday`：`09:30 <= time <= 11:30` 或 `13:00 <= time < 15:00`。
 
-premarket/midday 窗口外执行会返回 `PhaseTimeError`，不会新建或覆盖正式 JSON。close recovery 是唯一例外：只能读取目标交易日完整日线，`generated_at` 保留真实补齐时间，不能读取次日实时行情，也不能伪造为 15 点生成。采集脚本可在盘中运行，但不会把盘中数据写入 `close.json`。
+premarket/midday 的 scheduled run 在窗口外会返回 `PhaseTimeError`，不会新建或覆盖正式 JSON。两个受控例外都只能读取完整日线：`workflow_dispatch phase=premarket` 在快照 stale/missing/invalid 时以 `recovery` 模式补齐目标日的最近已完成交易日；close recovery 补齐目标收盘日。两者的 `generated_at` 均保留真实补齐时间，不读取实时行情，也不伪造生成时间。采集脚本可在盘中运行，但不会把盘中数据写入 `close.json`。
 
 ## 持仓与关注配置
 
@@ -106,7 +106,7 @@ close 的期望 `data_date` 是 nominal slot 对应时点“最近一个已经�
 
 新生成的快照仍必须通过“本次执行 30 分钟内”的严格 validator：顶层不得有未解决 `errors`；每只持仓/关注证券的 `latest_price`、`prev_close`、`open`、`high`、`low`、`volume`、`amount` 必须为有限数值，并满足正价格、`high >= low`、成交量/成交额非负。历史不足导致技术指标为 `null` 仍允许以 `partial` 通过，这与核心行情缺失是两个不同契约。recovery 额外要求证券/基准 `data_date` 等于目标交易日，且证券 `source_details.realtime` 必须为 `null`。生成器执行后若文件无 diff，系统重新检查 freshness；仍不 fresh 时输出 `SNAPSHOT_NOT_UPDATED` 并失败，三个正式 phase 不再有绿色特判。
 
-`workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动运行不会等待，直接由 Python 的真实时间窗口保护；`intraday` 不增加 cron。
+`workflow_dispatch` 只支持 `premarket`、`midday`、`close`、`intraday`，不暴露 `all` 或诊断覆盖开关。手动 premarket 先做 readiness：fresh 时 no-op；stale/missing/invalid 时进入 `recovery`，即使已过 08:50 也可用目标日前一个已完成交易日的完整日线补齐。scheduled premarket 仍严格受 08:50 截止保护；midday/intraday 的原有时间语义不变，`intraday` 不增加 cron。
 
 concurrency 按 phase 隔离：同 phase 的 primary/fallback 串行，不同 phase 互不阻塞。每个 job 在 readiness 前先 fast-forward 到远端最新分支，commit 前再次检查远端同 phase freshness；提交只 stage 当前 phase JSON，并在 `pull --rebase` 后最多尝试 push 三次。远端已由另一个任务写入合法 snapshot 时 no-op，不覆盖或重复提交。
 

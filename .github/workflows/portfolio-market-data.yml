@@ -91,7 +91,7 @@ jobs:
       - name: Resolve schedule and business-date context
         id: context
         run: |
-          args=(--phase "$PHASE")
+          args=(--phase "$PHASE" --event-name "$EVENT_NAME")
           if [ -n "$SCHEDULE_CRON" ]; then
             args+=(--schedule "$SCHEDULE_CRON")
           fi
@@ -184,7 +184,7 @@ jobs:
           if [ "$PHASE" != "intraday" ]; then
             args+=(--expected-data-date "$EXPECTED_DATA_DATE")
           fi
-          if [ "$PHASE" = "close" ]; then
+          if [ "$PHASE" = "close" ] || [ "$PHASE" = "premarket" ]; then
             args+=(--generation-mode "$GENERATION_MODE")
           fi
           if ! python scripts/portfolio_market_data.py "${args[@]}"; then
