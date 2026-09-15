@@ -89,25 +89,26 @@ def plan_scheduled_phase(
     business_date = target_date or current.date()
     if phase == "premarket":
         live_cutoff = datetime.combine(business_date, PREMARKET_END, SHANGHAI_TZ)
-        recovery_cutoff = datetime.combine(
-            business_date, PREMARKET_RECOVERY_END, SHANGHAI_TZ
-        )
-        if current.date() != business_date or current >= recovery_cutoff:
-            raise PhaseTimeError(
-                "RECOVERY_WINDOW_EXPIRED: premarket recovery requires the "
-                "target trading date before 09:25 Asia/Shanghai"
-            )
         if current > live_cutoff and generation_mode != "recovery":
             raise PhaseTimeError(
                 "RECOVERY_REQUIRED: premarket after 08:50 requires recovery "
                 "generation_mode"
             )
         return PhaseWaitPlan(
-            phase, current, None, recovery_cutoff, 0, generation_mode
+            phase, current, None, None if generation_mode == "recovery" else live_cutoff, 0, generation_mode
         )
     if phase == "midday":
         target = datetime.combine(business_date, MIDDAY_TARGET, SHANGHAI_TZ)
         cutoff = datetime.combine(business_date, MIDDAY_END, SHANGHAI_TZ)
+        if generation_mode == "reconstructed":
+            return PhaseWaitPlan(
+                phase,
+                current,
+                target,
+                None,
+                max(0, int((target - current).total_seconds())),
+                generation_mode,
+            )
     elif phase == "close":
         close_date = expected_data_date or business_date
         target = datetime.combine(close_date, CLOSE_TARGET, SHANGHAI_TZ)

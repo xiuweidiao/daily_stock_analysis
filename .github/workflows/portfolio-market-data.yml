@@ -63,7 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     concurrency:
-      group: portfolio-market-data-${{ github.ref }}-${{ needs.resolve_phase.outputs.phase }}
+      # Snapshot manifests, latest pointers and health are shared derived state.
+      group: portfolio-snapshot-writer-${{ github.ref }}
       cancel-in-progress: false
     env:
       PHASE: ${{ needs.resolve_phase.outputs.phase }}
@@ -182,12 +183,32 @@ jobs:
           steps.decision.outputs.should_generate == 'true' &&
           (env.PHASE == 'intraday' || steps.before_generator.outputs.should_generate == 'true')
         env:
+          TARGET_DATE: ${{ steps.context.outputs.target_date }}
           EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
           GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
         run: |
           echo "attempted=true" >> "$GITHUB_OUTPUT"
+          if [ "$GENERATION_MODE" = "reconstructed" ]; then
+            result_path="$(mktemp)"
+            if ! python scripts/portfolio_snapshot_repair.py \
+              --phase "$PHASE" \
+              --target-date "$TARGET_DATE" \
+              --result-path "$result_path"; then
+              echo "GENERATION_FAILED"
+              echo "result=failed" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            result="$(cat "$result_path")"
+            rm -f "$result_path"
+            printf '%s\n' "$result"
+            state="$(printf '%s' "$result" | jq -r '.[-1].state // empty')"
+            echo "state=$state" >> "$GITHUB_OUTPUT"
+            echo "result=run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           args=(--phase "$PHASE")
           if [ "$PHASE" != "intraday" ]; then
+            args+=(--target-date "$TARGET_DATE")
             args+=(--expected-data-date "$EXPECTED_DATA_DATE")
           fi
           if [ "$PHASE" != "intraday" ]; then
@@ -209,7 +230,8 @@ jobs:
           GENERATION_MODE: ${{ steps.context.outputs.generation_mode }}
         run: |
           snapshot="data/portfolio/${PHASE}.json"
-          if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
+          canonical="data/portfolio/snapshots/${TARGET_DATE}/${PHASE}.json"
+          if [ -z "$(git status --porcelain -- data/portfolio)" ]; then
             echo "git_diff=unchanged" >> "$GITHUB_OUTPUT"
             if [ "$PHASE" != "intraday" ]; then
               readiness="$(python scripts/portfolio_snapshot_readiness.py \
@@ -230,7 +252,25 @@ jobs:
             exit 1
           fi
           echo "git_diff=changed" >> "$GITHUB_OUTPUT"
-          args=(--phase "$PHASE" --path "$snapshot")
+          if [ "$PHASE" != "intraday" ] && [ -f "$canonical" ]; then
+            validation_path="$canonical"
+          else
+            validation_path="$snapshot"
+          fi
+          if [ "$GENERATION_MODE" = "reconstructed" ] && [ ! -f "$canonical" ]; then
+            manifest="data/portfolio/snapshots/${TARGET_DATE}/manifest.json"
+            lifecycle="$(jq -r ".phases.${PHASE}.lifecycle_status // empty" "$manifest" 2>/dev/null || true)"
+            if [ "$lifecycle" = "missed" ] || [ "$lifecycle" = "error" ]; then
+              echo "generated=true" >> "$GITHUB_OUTPUT"
+              echo "validator=degraded" >> "$GITHUB_OUTPUT"
+              echo "SNAPSHOT_MISSED"
+              exit 0
+            fi
+            echo "validator=fail" >> "$GITHUB_OUTPUT"
+            echo "SNAPSHOT_NOT_UPDATED"
+            exit 1
+          fi
+          args=(--phase "$PHASE" --path "$validation_path")
           if [ "$PHASE" != "intraday" ]; then
             args+=(--target-date "$TARGET_DATE")
             args+=(--expected-data-date "$EXPECTED_DATA_DATE")
@@ -259,7 +299,13 @@ jobs:
             fi
             git fetch origin "$GITHUB_REF_NAME"
             remote_snapshot="$(mktemp)"
-            if ! git show "origin/${GITHUB_REF_NAME}:${snapshot}" > "$remote_snapshot" 2>/dev/null; then
+            canonical="data/portfolio/snapshots/${TARGET_DATE}/${PHASE}.json"
+            if git cat-file -e "origin/${GITHUB_REF_NAME}:${canonical}" 2>/dev/null; then
+              remote_path="$canonical"
+            else
+              remote_path="$snapshot"
+            fi
+            if ! git show "origin/${GITHUB_REF_NAME}:${remote_path}" > "$remote_snapshot" 2>/dev/null; then
               rm -f "$remote_snapshot"
               return 1
             fi
@@ -279,10 +325,10 @@ jobs:
             exit 0
           fi
 
-          git add -- "$snapshot"
+          git add -- data/portfolio
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git commit -m "chore: update portfolio ${PHASE} data"; then
+          if ! git commit -m "chore: update portfolio ${PHASE} snapshot state"; then
             echo "PUSH_FAILED"
             echo "result=failed" >> "$GITHUB_OUTPUT"
             exit 1
@@ -323,7 +369,14 @@ jobs:
         run: |
           git fetch origin "$GITHUB_REF_NAME"
           remote_snapshot="$(mktemp)"
-          if ! git show "origin/${GITHUB_REF_NAME}:data/portfolio/${PHASE}.json" > "$remote_snapshot" 2>/dev/null; then
+          canonical="data/portfolio/snapshots/${TARGET_DATE}/${PHASE}.json"
+          compatibility="data/portfolio/${PHASE}.json"
+          if git cat-file -e "origin/${GITHUB_REF_NAME}:${canonical}" 2>/dev/null; then
+            remote_path="$canonical"
+          else
+            remote_path="$compatibility"
+          fi
+          if ! git show "origin/${GITHUB_REF_NAME}:${remote_path}" > "$remote_snapshot" 2>/dev/null; then
             echo "FINAL_SNAPSHOT_NOT_FRESH"
             exit 1
           fi
@@ -336,6 +389,19 @@ jobs:
           rm -f "$remote_snapshot"
           printf '%s\n' "$readiness"
           if [ "$(printf '%s' "$readiness" | jq -r '.fresh')" != "true" ]; then
+            if [ "$GENERATION_MODE" = "reconstructed" ]; then
+              remote_manifest="$(mktemp)"
+              if git show "origin/${GITHUB_REF_NAME}:data/portfolio/snapshots/${TARGET_DATE}/manifest.json" > "$remote_manifest" 2>/dev/null; then
+                lifecycle="$(jq -r ".phases.${PHASE}.lifecycle_status // empty" "$remote_manifest")"
+                rm -f "$remote_manifest"
+                if [ "$lifecycle" = "missed" ] || [ "$lifecycle" = "error" ]; then
+                  echo "fresh=false" >> "$GITHUB_OUTPUT"
+                  echo "degraded=true" >> "$GITHUB_OUTPUT"
+                  echo "SNAPSHOT_MISSED"
+                  exit 0
+                fi
+              fi
+            fi
             echo "FINAL_SNAPSHOT_NOT_FRESH"
             exit 1
           fi
@@ -371,10 +437,22 @@ jobs:
           COMMIT_RESULT: ${{ steps.commit.outputs.result }}
           GATE_STATUS: ${{ steps.gate.outputs.status }}
           FINAL_FRESH: ${{ steps.final.outputs.fresh }}
+          FINAL_DEGRADED: ${{ steps.final.outputs.degraded }}
           FINAL_GENERATED_AT: ${{ steps.final.outputs.generated_at }}
           FINAL_DATA_DATE: ${{ steps.final.outputs.data_date }}
         run: |
-          if [ "$FINAL_FRESH" = "true" ] && [ "$COMMIT_RESULT" = "committed" ]; then
+          summary_snapshot="data/portfolio/snapshots/${TARGET_DATE}/${PHASE}.json"
+          if [ ! -f "$summary_snapshot" ]; then
+            summary_snapshot="data/portfolio/${PHASE}.json"
+          fi
+          snapshot_as_of="$(jq -r '.snapshot_as_of // empty' "$summary_snapshot" 2>/dev/null || true)"
+          snapshot_status="$(jq -r '.status // empty' "$summary_snapshot" 2>/dev/null || true)"
+          snapshot_completeness="$(jq -r '.completeness // empty' "$summary_snapshot" 2>/dev/null || true)"
+          provider="$(jq -r '.provenance.provider // empty' "$summary_snapshot" 2>/dev/null || true)"
+          pipeline_health="$(jq -r '.status // empty' data/portfolio/pipeline_health.json 2>/dev/null || true)"
+          if [ "$FINAL_DEGRADED" = "true" ]; then
+            final_state="SNAPSHOT_MISSED"
+          elif [ "$FINAL_FRESH" = "true" ] && [ "$COMMIT_RESULT" = "committed" ]; then
             final_state="SNAPSHOT_GENERATED"
           elif [ "$COMMIT_RESULT" = "no-op" ]; then
             final_state="REMOTE_SNAPSHOT_ALREADY_FRESH"
@@ -433,12 +511,17 @@ jobs:
             echo "- phase gate: ${GATE_STATUS:-skipped}"
             echo "- generator: ${GENERATOR_RESULT:-skipped}"
             echo "- generation mode: ${GENERATION_MODE:-live}"
+            echo "- provider selected: ${provider:-per-security fallback chain}"
             echo "- validator: ${VALIDATOR_RESULT:-skipped}"
             echo "- git diff: ${GIT_DIFF_RESULT:-unchanged}"
             echo "- commit: ${COMMIT_RESULT:-no-op}"
             echo
             echo "Final:"
             echo "- snapshot fresh: ${FINAL_FRESH:-false}"
+            echo "- snapshot_as_of: ${snapshot_as_of:-unavailable}"
+            echo "- snapshot status: ${snapshot_status:-unavailable}"
+            echo "- completeness: ${snapshot_completeness:-unavailable}"
+            echo "- pipeline health: ${pipeline_health:-unavailable}"
             echo "- final generated_at: ${FINAL_GENERATED_AT:-unavailable}"
             echo "- final data_date: ${FINAL_DATA_DATE:-unavailable}"
             echo "- final state code: ${final_state}"

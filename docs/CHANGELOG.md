@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [新功能] 新增按交易日保存的 Portfolio Snapshot Store、历史 universe、manifest 与 pipeline health，并支持基于 AkShare Sina 1 分钟历史的 11:30 午盘真实重建。
+- [改进] Portfolio repair 以状态驱动补齐最近五个交易日，旧日期修复不会倒退 latest 与兼容 JSON。
 - [修复] 允许 workflow_dispatch 在 08:50 后以完整日线 recovery 补齐 stale/missing/invalid 的 premarket 快照，scheduled premarket 仍保留原时间截止保护。
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->

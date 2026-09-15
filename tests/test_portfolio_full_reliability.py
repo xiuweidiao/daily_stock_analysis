@@ -112,24 +112,23 @@ def test_premarket_third_slot_independently_targets_same_business_day() -> None:
     assert resolve_phase(PREMARKET_CRONS[2]) == "premarket"
 
 
-def test_premarket_delayed_145_minutes_expires_for_data_semantics() -> None:
+def test_premarket_delayed_145_minutes_uses_previous_close_recovery() -> None:
     current = datetime(2026, 8, 28, 10, 2, tzinfo=SHANGHAI)
     context = build_schedule_context(
         phase="premarket", schedule=PREMARKET_CRONS[2], current=current
     )
 
     assert context.lateness_minutes == 145
-    assert context.reason == "RECOVERY_WINDOW_EXPIRED"
-    assert context.can_generate is False
+    assert context.reason == "RECOVERY_REQUIRED"
+    assert context.can_generate is True
     assert context.generation_mode == "recovery"
-    assert context.inside_recovery_window is False
-    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
-        plan_scheduled_phase(
-            "premarket",
-            current,
-            target_date=date(2026, 8, 28),
-            generation_mode="recovery",
-        )
+    assert context.inside_recovery_window is True
+    assert plan_scheduled_phase(
+        "premarket",
+        current,
+        target_date=date(2026, 8, 28),
+        generation_mode="recovery",
+    ).wait_seconds == 0
 
 
 def test_premarket_live_allows_0830_but_rejects_0921() -> None:
@@ -227,18 +226,19 @@ def test_midday_delayed_from_1135_to_1152_still_generates_stale_snapshot(
     ).wait_seconds == 0
 
 
-def test_midday_delayed_to_2200_is_explicitly_missed() -> None:
+def test_midday_delayed_to_2200_requires_historical_reconstruction() -> None:
     context = build_schedule_context(
         phase="midday",
         schedule=MIDDAY_CRONS[0],
         current=datetime(2026, 8, 28, 22, 36, tzinfo=SHANGHAI),
     )
 
-    assert context.reason == "RECOVERY_WINDOW_EXPIRED"
-    assert context.inside_recovery_window is False
+    assert context.reason == "RECONSTRUCTION_REQUIRED"
+    assert context.generation_mode == "reconstructed"
+    assert context.inside_recovery_window is True
 
 
-def test_midday_stale_at_1320_expires_recovery_window(tmp_path: Path) -> None:
+def test_midday_stale_at_1320_switches_to_reconstruction(tmp_path: Path) -> None:
     path = tmp_path / "midday.json"
     _write(
         path,
@@ -264,10 +264,15 @@ def test_midday_stale_at_1320_expires_recovery_window(tmp_path: Path) -> None:
     )
 
     assert readiness.should_generate is True
-    assert context.can_generate is False
-    assert context.reason == "RECOVERY_WINDOW_EXPIRED"
-    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
-        plan_scheduled_phase("midday", current, target_date=date(2026, 8, 28))
+    assert context.can_generate is True
+    assert context.reason == "RECONSTRUCTION_REQUIRED"
+    assert context.generation_mode == "reconstructed"
+    assert plan_scheduled_phase(
+        "midday",
+        current,
+        target_date=date(2026, 8, 28),
+        generation_mode="reconstructed",
+    ).wait_seconds == 0
 
 
 def test_close_delayed_from_1543_to_1730_still_generates(
@@ -477,16 +482,19 @@ def test_premarket_recovery_rejects_wrong_expected_data_date() -> None:
         )
 
 
-def test_premarket_recovery_rejects_generated_at_at_deadline() -> None:
-    with pytest.raises(PhaseTimeError, match="RECOVERY_WINDOW_EXPIRED"):
-        build_payload(
-            "premarket",
-            sources=RecoverySources(date(2026, 8, 31)),
-            portfolio=PORTFOLIO,
-            now=datetime(2026, 9, 1, 9, 25, tzinfo=SHANGHAI),
-            expected_data_date=date(2026, 8, 31),
-            generation_mode="recovery",
-        )
+def test_premarket_recovery_after_deadline_keeps_previous_close_semantics() -> None:
+    payload = build_payload(
+        "premarket",
+        sources=RecoverySources(date(2026, 8, 31)),
+        portfolio=PORTFOLIO,
+        now=datetime(2026, 9, 1, 17, 47, tzinfo=SHANGHAI),
+        target_date=date(2026, 9, 1),
+        expected_data_date=date(2026, 8, 31),
+        generation_mode="recovery",
+    )
+    assert payload["snapshot_kind"] == "previous_close_context"
+    assert payload["data_date"] == "2026-08-31"
+    assert payload["generated_at"] == "2026-09-01T17:47:00+08:00"
 
 
 def test_premarket_recovery_contract_rejects_wrong_payload_data_date() -> None:
@@ -623,10 +631,7 @@ def test_workflow_has_phase_isolation_and_finite_push_retry() -> None:
     )
 
     assert "needs: resolve_phase" in workflow
-    assert (
-        "group: portfolio-market-data-${{ github.ref }}-"
-        "${{ needs.resolve_phase.outputs.phase }}"
-    ) in workflow
+    assert "group: portfolio-snapshot-writer-${{ github.ref }}" in workflow
     assert "for attempt in 1 2 3" in workflow
     assert "remote_is_fresh" in workflow
     assert "Verify final remote freshness" in workflow

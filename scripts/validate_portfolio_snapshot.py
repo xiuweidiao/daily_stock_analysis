@@ -19,12 +19,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from scripts.portfolio_config import DEFAULT_CONFIG_PATH, PortfolioConfig, load_portfolio_config
 from scripts.portfolio_market_data import PHASES, TIMEZONE_NAME, _phase_data_date
-from scripts.portfolio_phase_policy import (
-    PREMARKET_RECOVERY_END,
-    SHANGHAI_TZ,
-    PhaseTimeError,
-    validate_phase_time,
-)
+from scripts.portfolio_phase_policy import SHANGHAI_TZ, PhaseTimeError, validate_phase_time
 from src.core.trading_calendar import is_market_open
 
 
@@ -87,26 +82,64 @@ def validate_snapshot_contract(
         raise SnapshotContractError(f"timezone must be {TIMEZONE_NAME}")
     if payload.get("market_phase") != phase:
         raise SnapshotContractError(f"market_phase must be {phase}")
+    if payload.get("schema_version") is not None:
+        if payload.get("schema_version") != "2.0":
+            raise SnapshotContractError("schema_version must be 2.0")
+        if payload.get("status") not in {"ok", "partial"}:
+            raise SnapshotContractError("status must be ok or partial for a data snapshot")
+        if payload.get("completeness") not in {"full", "partial"}:
+            raise SnapshotContractError("completeness must be full or partial")
+        if target_date is not None and payload.get("trading_date") != target_date.isoformat():
+            raise SnapshotContractError("trading_date does not match target_date")
 
     generated_at = _parse_generated_at(payload.get("generated_at"))
-    expected_target_date = target_date or current.date()
+    payload_trading_date = payload.get("trading_date")
+    expected_target_date = target_date or (
+        date.fromisoformat(payload_trading_date)
+        if isinstance(payload_trading_date, str)
+        else current.date()
+    )
     mode = generation_mode or str(payload.get("generation_mode") or "live")
-    if mode not in {"live", "recovery"}:
-        raise SnapshotContractError("generation_mode must be live or recovery")
-    if phase not in {"premarket", "close"} and mode != "live":
+    if mode not in {"live", "recovery", "reconstructed"}:
+        raise SnapshotContractError(
+            "generation_mode must be live, recovery or reconstructed"
+        )
+    if mode == "recovery" and phase not in {"premarket", "close"}:
         raise SnapshotContractError(
             "recovery generation_mode is only valid for premarket or close"
+        )
+    if mode == "reconstructed" and phase != "midday":
+        raise SnapshotContractError(
+            "reconstructed generation_mode is only valid for midday"
         )
     payload_mode = str(payload.get("generation_mode") or "live")
     if (
         generation_mode is not None
-        and phase in {"premarket", "close"}
+        and phase in {"premarket", "midday", "close"}
         and payload_mode != generation_mode
     ):
         raise SnapshotContractError(
             f"generation_mode must be {generation_mode}, got {payload_mode!r}"
         )
     expected_date = expected_data_date or _phase_data_date(phase, generated_at)
+    if payload.get("schema_version") == "2.0":
+        expected_kind = {
+            "premarket": "previous_close_context",
+            "midday": "morning_close",
+            "close": "official_close",
+            "intraday": "intraday",
+        }[phase]
+        if payload.get("snapshot_kind") != expected_kind:
+            raise SnapshotContractError(f"snapshot_kind must be {expected_kind}")
+        snapshot_as_of = _parse_generated_at(payload.get("snapshot_as_of"))
+        if phase in {"premarket", "close"}:
+            expected_as_of = datetime.combine(
+                expected_date, time(15, 0), SHANGHAI_TZ
+            )
+            if snapshot_as_of != expected_as_of:
+                raise SnapshotContractError(
+                    f"{phase} snapshot_as_of must be the official 15:00 close"
+                )
     if mode == "recovery" and phase == "close":
         earliest_recovery = datetime.combine(
             expected_date, time(15, 0), SHANGHAI_TZ
@@ -116,18 +149,6 @@ def validate_snapshot_contract(
                 "recovery close generated_at cannot precede the target session close"
             )
     elif mode == "recovery" and phase == "premarket":
-        if generated_at.date() != expected_target_date:
-            raise SnapshotContractError(
-                "premarket recovery generated_at is not the target date"
-            )
-        recovery_cutoff = datetime.combine(
-            expected_target_date, PREMARKET_RECOVERY_END, SHANGHAI_TZ
-        )
-        if generated_at >= recovery_cutoff:
-            raise SnapshotContractError(
-                "premarket recovery generated_at must be before 09:25 "
-                "Asia/Shanghai"
-            )
         target_reference = datetime.combine(
             expected_target_date, time(8, 0), SHANGHAI_TZ
         )
@@ -136,6 +157,19 @@ def validate_snapshot_contract(
             raise SnapshotContractError(
                 "premarket recovery expected data_date must be the latest "
                 f"completed A-share trading day ({latest_completed_date})"
+            )
+    elif mode == "reconstructed":
+        snapshot_as_of = _parse_generated_at(payload.get("snapshot_as_of"))
+        expected_as_of = datetime.combine(
+            expected_target_date, time(11, 30), SHANGHAI_TZ
+        )
+        if snapshot_as_of != expected_as_of:
+            raise SnapshotContractError(
+                "reconstructed midday snapshot_as_of must be exactly 11:30 Asia/Shanghai"
+            )
+        if generated_at < expected_as_of:
+            raise SnapshotContractError(
+                "reconstructed midday generated_at cannot precede snapshot_as_of"
             )
     else:
         if generated_at.date() != expected_target_date:
@@ -178,7 +212,7 @@ def validate_snapshot_contract(
         raise SnapshotContractError("benchmarks must be an array")
     if not isinstance(errors, list):
         raise SnapshotContractError("errors must be an array")
-    if errors:
+    if errors and payload.get("status") != "partial":
         raise SnapshotContractError("snapshot contains unresolved data errors")
 
     expected_tracking = list(portfolio.tracked_securities())
@@ -189,20 +223,29 @@ def validate_snapshot_contract(
         actual_tracking.append((stock.get("code"), stock.get("tracking_type")))
     if actual_tracking != expected_tracking:
         raise SnapshotContractError("stocks code/tracking_type does not match portfolio config")
+    if payload.get("schema_version") == "2.0":
+        expected_holdings_items = [
+            item for item in stocks if item.get("tracking_type") == "holding"
+        ]
+        expected_watchlist_items = [
+            item for item in stocks if item.get("tracking_type") == "watchlist"
+        ]
+        if payload.get("holdings") != expected_holdings_items:
+            raise SnapshotContractError("holdings must match holding items in stocks")
+        if payload.get("watchlist") != expected_watchlist_items:
+            raise SnapshotContractError("watchlist must match watchlist items in stocks")
     for stock in stocks:
         if stock.get("status") not in {"ok", "partial"}:
             raise SnapshotContractError(
                 f"stock {stock.get('code')!r} is not usable"
             )
-        if mode == "recovery":
+        if mode in {"recovery", "reconstructed"}:
             if stock.get("data_date") != expected_data_date_text:
                 raise SnapshotContractError(
                     f"stock {stock.get('code')!r} data_date must be {expected_data_date_text}"
                 )
             source_details = stock.get("source_details")
-            if not isinstance(source_details, Mapping) or source_details.get(
-                "realtime"
-            ) is not None:
+            if not isinstance(source_details, Mapping) or source_details.get("realtime") is not None:
                 raise SnapshotContractError(
                     f"stock {stock.get('code')!r} recovery data must not use realtime quotes"
                 )
@@ -245,7 +288,7 @@ def validate_snapshot_contract(
             raise SnapshotContractError(
                 f"benchmark {benchmark.get('code')!r} is not usable"
             )
-        if mode == "recovery" and benchmark.get("data_date") != expected_data_date_text:
+        if mode in {"recovery", "reconstructed"} and benchmark.get("data_date") != expected_data_date_text:
             raise SnapshotContractError(
                 f"benchmark {benchmark.get('code')!r} data_date must be {expected_data_date_text}"
             )
@@ -264,7 +307,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--target-date", type=date.fromisoformat)
     parser.add_argument("--expected-data-date", type=date.fromisoformat)
-    parser.add_argument("--generation-mode", choices=("live", "recovery"))
+    parser.add_argument(
+        "--generation-mode", choices=("live", "recovery", "reconstructed")
+    )
     return parser.parse_args()
 
 

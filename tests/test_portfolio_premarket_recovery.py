@@ -325,10 +325,7 @@ def test_workflow_serializes_delayed_primary_and_fallback() -> None:
         encoding="utf-8"
     )
 
-    assert (
-        "group: portfolio-market-data-${{ github.ref }}-"
-        "${{ needs.resolve_phase.outputs.phase }}"
-    ) in workflow
+    assert "group: portfolio-snapshot-writer-${{ github.ref }}" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "steps.readiness.outputs.should_generate" in workflow
     assert "steps.decision.outputs.should_generate == 'true'" in workflow

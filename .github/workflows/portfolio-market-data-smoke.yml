@@ -7,6 +7,7 @@ on:
       - '.github/requirements-portfolio-pipeline.txt'
       - '.github/workflows/portfolio-market-data*.yml'
       - '.github/workflows/portfolio-close-watchdog.yml'
+      - '.github/workflows/portfolio-snapshot-repair.yml'
       - 'scripts/portfolio_*.py'
       - 'data_provider/**'
       - 'src/**'
@@ -39,4 +40,6 @@ jobs:
           python scripts/portfolio_premarket_readiness.py --help
           python scripts/portfolio_close_readiness.py --help
           python scripts/portfolio_close_watchdog.py --help
+          python scripts/portfolio_snapshot_repair.py --help
+          python -c "import scripts.portfolio_intraday_history; import scripts.portfolio_midday_reconstruction; import scripts.portfolio_snapshot_store"
           python scripts/validate_portfolio_snapshot.py --help

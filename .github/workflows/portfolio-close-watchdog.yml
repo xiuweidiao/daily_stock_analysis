@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: portfolio-market-data-${{ github.ref }}-close
+  group: portfolio-snapshot-writer-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -70,6 +70,7 @@ jobs:
           echo "attempted=true" >> "$GITHUB_OUTPUT"
           if ! python scripts/portfolio_market_data.py \
             --phase close \
+            --target-date "$TARGET_DATE" \
             --expected-data-date "$TARGET_DATE" \
             --generation-mode recovery; then
             echo "result=failed" >> "$GITHUB_OUTPUT"
@@ -85,7 +86,8 @@ jobs:
           TARGET_DATE: ${{ steps.recheck.outputs.target_date }}
         run: |
           snapshot="data/portfolio/close.json"
-          if [ -z "$(git status --porcelain -- "$snapshot")" ]; then
+          canonical="data/portfolio/snapshots/${TARGET_DATE}/close.json"
+          if [ -z "$(git status --porcelain -- data/portfolio)" ]; then
             echo "git_diff=unchanged" >> "$GITHUB_OUTPUT"
             readiness="$(python scripts/portfolio_snapshot_readiness.py \
               --phase close \
@@ -108,7 +110,7 @@ jobs:
           echo "git_diff=changed" >> "$GITHUB_OUTPUT"
           if ! python scripts/validate_portfolio_snapshot.py \
             --phase close \
-            --path "$snapshot" \
+            --path "$canonical" \
             --target-date "$TARGET_DATE" \
             --expected-data-date "$TARGET_DATE" \
             --generation-mode recovery; then
@@ -150,7 +152,7 @@ jobs:
             exit 0
           fi
 
-          git add -- "$snapshot"
+          git add -- data/portfolio
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git commit -m "chore: recover portfolio close data"; then

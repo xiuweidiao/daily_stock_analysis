@@ -23,7 +23,6 @@ from scripts.portfolio_phase_policy import (
     MIDDAY_END,
     MIDDAY_START,
     PREMARKET_END,
-    PREMARKET_RECOVERY_END,
     SHANGHAI_TZ,
     as_shanghai_time,
 )
@@ -138,43 +137,35 @@ def build_schedule_context(
     if phase == "premarket":
         live_cutoff = datetime.combine(target_date, PREMARKET_END, SHANGHAI_TZ)
         recovery_start_at = datetime.combine(target_date, time(0, 0), SHANGHAI_TZ)
-        recovery_end_at = datetime.combine(
-            target_date, PREMARKET_RECOVERY_END, SHANGHAI_TZ
-        )
-        cutoff_at = recovery_end_at
+        recovery_end_at = None
+        cutoff_at = live_cutoff
         generation_mode = (
             "recovery"
             if event_name == "workflow_dispatch" or current_cn > live_cutoff
             else "live"
         )
-        inside_recovery_window = (
-            recovery_start_at <= current_cn < recovery_end_at
-        )
+        inside_recovery_window = current_cn >= recovery_start_at
         if not target_is_trading_day:
             can_generate = False
             reason = "NON_TRADING_DAY"
-        elif not inside_recovery_window:
-            can_generate = False
-            reason = "RECOVERY_WINDOW_EXPIRED"
         elif generation_mode == "recovery":
             reason = "RECOVERY_REQUIRED"
     elif phase == "midday":
+        generation_mode = "reconstructed"
         recovery_start_at = datetime.combine(
             target_date, MIDDAY_START, SHANGHAI_TZ
         )
-        recovery_end_at = datetime.combine(target_date, MIDDAY_END, SHANGHAI_TZ)
-        cutoff_at = recovery_end_at
-        inside_recovery_window = (
-            recovery_start_at <= current_cn < recovery_end_at
-        )
+        live_end = datetime.combine(target_date, MIDDAY_END, SHANGHAI_TZ)
+        cutoff_at = live_end
+        recovery_end_at = None
+        inside_recovery_window = current_cn >= recovery_start_at
         if not target_is_trading_day:
             can_generate = False
             reason = "NON_TRADING_DAY"
-        elif current_cn.date() != target_date or current_cn >= recovery_end_at:
-            can_generate = False
-            reason = "RECOVERY_WINDOW_EXPIRED"
         elif current_cn < recovery_start_at:
             reason = "waiting_for_market_target"
+        else:
+            reason = "RECONSTRUCTION_REQUIRED"
     elif phase == "close":
         expected_close = datetime.combine(
             expected_data_date, CLOSE_TARGET, SHANGHAI_TZ

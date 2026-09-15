@@ -25,6 +25,7 @@ from scripts.portfolio_config import (
 from scripts.portfolio_market_data import OFFICIAL_OUTPUT_DIR, REPORT_PHASES
 from scripts.portfolio_phase_policy import SHANGHAI_TZ, as_shanghai_time
 from scripts.portfolio_schedule_context import build_schedule_context
+from scripts.portfolio_snapshot_store import portfolio_from_universe
 from scripts.validate_portfolio_snapshot import (
     SnapshotContractError,
     _parse_generated_at,
@@ -250,7 +251,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--target-date", type=date.fromisoformat)
     parser.add_argument("--expected-data-date", type=date.fromisoformat)
-    parser.add_argument("--generation-mode", choices=("live", "recovery"))
+    parser.add_argument(
+        "--generation-mode", choices=("live", "recovery", "reconstructed")
+    )
     parser.add_argument("--schedule")
     parser.add_argument("--now", help="ISO-8601 test/diagnostic clock")
     return parser.parse_args(argv)
@@ -269,9 +272,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         context.expected_data_date
     )
     generation_mode = args.generation_mode or context.generation_mode
+    canonical_path = (
+        OFFICIAL_OUTPUT_DIR
+        / "snapshots"
+        / target_date.isoformat()
+        / f"{args.phase}.json"
+    )
+    default_path = (
+        canonical_path
+        if canonical_path.exists()
+        else OFFICIAL_OUTPUT_DIR / f"{args.phase}.json"
+    )
     portfolio = load_portfolio_config(args.config)
+    if args.path is None and canonical_path.exists():
+        universe_path = OFFICIAL_OUTPUT_DIR / "universe" / f"{target_date}.json"
+        if universe_path.exists():
+            universe = json.loads(universe_path.read_text(encoding="utf-8"))
+            portfolio = portfolio_from_universe(universe)
     result = inspect_snapshot(
-        args.path or OFFICIAL_OUTPUT_DIR / f"{args.phase}.json",
+        args.path or default_path,
         phase=args.phase,
         portfolio=portfolio,
         target_date=target_date,
