@@ -34,7 +34,6 @@ from scripts.portfolio_config import (
 )
 from scripts.portfolio_phase_policy import (
     PhaseTimeError,
-    PREMARKET_RECOVERY_END,
     SHANGHAI_TZ,
     validate_phase_time,
 )
@@ -891,6 +890,7 @@ def build_payload(
     portfolio: PortfolioConfig,
     now: Optional[datetime] = None,
     allow_phase_time_override: bool = False,
+    target_date: date | None = None,
     expected_data_date: date | None = None,
     generation_mode: str = "live",
 ) -> Dict[str, Any]:
@@ -901,11 +901,33 @@ def build_payload(
         current = current.replace(tzinfo=SHANGHAI_TZ)
     else:
         current = current.astimezone(SHANGHAI_TZ)
-    if generation_mode not in {"live", "recovery"}:
-        raise ValueError("generation_mode must be live or recovery")
+    if generation_mode not in {"live", "recovery", "reconstructed"}:
+        raise ValueError("generation_mode must be live, recovery or reconstructed")
+    if generation_mode == "reconstructed" and phase != "midday":
+        raise ValueError("reconstructed generation_mode is only valid for midday")
     if generation_mode == "recovery" and phase not in {"premarket", "close"}:
         raise ValueError(
             "recovery generation_mode is only valid for premarket or close"
+        )
+    trading_date = target_date or (
+        expected_data_date
+        if phase == "close" and generation_mode == "recovery" and expected_data_date
+        else current.date()
+    )
+    if generation_mode == "reconstructed":
+        if expected_data_date is None or expected_data_date != trading_date:
+            raise PhaseTimeError(
+                "midday reconstruction requires expected_data_date == target_date"
+            )
+        if current < datetime.combine(trading_date, time(11, 30), SHANGHAI_TZ):
+            raise PhaseTimeError("midday reconstruction cannot run before 11:30")
+        from scripts.portfolio_midday_reconstruction import reconstruct_midday_snapshot
+
+        return reconstruct_midday_snapshot(
+            target_date=trading_date,
+            portfolio=portfolio,
+            sources=sources,
+            now=current,
         )
     if generation_mode == "recovery":
         if expected_data_date is None:
@@ -915,16 +937,8 @@ def build_payload(
                 f"{phase} recovery target must be an A-share trading day"
             )
         if phase == "premarket":
-            recovery_cutoff = datetime.combine(
-                current.date(), PREMARKET_RECOVERY_END, SHANGHAI_TZ
-            )
-            if current >= recovery_cutoff:
-                raise PhaseTimeError(
-                    "RECOVERY_WINDOW_EXPIRED: premarket recovery requires "
-                    "generation before 09:25 Asia/Shanghai"
-                )
             target_reference = datetime.combine(
-                current.date(), time(8, 0), SHANGHAI_TZ
+                trading_date, time(8, 0), SHANGHAI_TZ
             )
             completed_date = _phase_data_date("premarket", target_reference)
             if expected_data_date != completed_date:
@@ -966,18 +980,47 @@ def build_payload(
     )
     errors.extend(benchmark_errors)
     payload = {
+        "schema_version": "2.0",
+        "trading_date": trading_date.isoformat(),
         "generated_at": generated_at,
         "timezone": TIMEZONE_NAME,
         "market_phase": phase,
+        "snapshot_kind": (
+            "previous_close_context" if phase == "premarket" else
+            "morning_close" if phase == "midday" else
+            "official_close" if phase == "close" else "intraday"
+        ),
+        "snapshot_as_of": (
+            datetime.combine(data_date, time(15, 0), SHANGHAI_TZ).isoformat()
+            if phase in {"premarket", "close"}
+            else current.isoformat()
+        ),
         "data_date": data_date.isoformat(),
+        "status": (
+            "partial"
+            if any(item.get("status") != "ok" for item in [*stocks, *benchmarks])
+            else "ok"
+        ),
+        "completeness": (
+            "partial"
+            if any(item.get("status") != "ok" for item in [*stocks, *benchmarks])
+            else "full"
+        ),
         "portfolio_status": "ok" if tracked_securities else "empty",
         "holdings_codes": list(portfolio.holdings),
         "watchlist_codes": list(portfolio.watchlist),
+        "holdings": [
+            item for item in stocks if item.get("tracking_type") == "holding"
+        ],
+        "watchlist": [
+            item for item in stocks if item.get("tracking_type") == "watchlist"
+        ],
         "stocks": stocks,
         "benchmarks": benchmarks,
         "errors": errors,
+        "provenance": {"generation_mode": generation_mode},
     }
-    if phase == "close" or generation_mode == "recovery":
+    if phase in REPORT_PHASES:
         payload["generation_mode"] = generation_mode
     return payload
 
@@ -1000,8 +1043,11 @@ def parse_args() -> argparse.Namespace:
         help="generate on a non-trading day (manual diagnostics only)",
     )
     parser.add_argument("--expected-data-date", type=date.fromisoformat)
+    parser.add_argument("--target-date", type=date.fromisoformat)
     parser.add_argument(
-        "--generation-mode", choices=("live", "recovery"), default="live"
+        "--generation-mode",
+        choices=("live", "recovery", "reconstructed"),
+        default="live",
     )
     parser.add_argument(
         "--allow-phase-time-override",
@@ -1033,6 +1079,7 @@ def generate_snapshots(
     output_dir: Path,
     allow_phase_time_override: bool = False,
     expected_data_date: date | None = None,
+    target_date: date | None = None,
     generation_mode: str = "live",
 ) -> List[Path]:
     if phase_selection == "all" and not allow_phase_time_override:
@@ -1046,7 +1093,7 @@ def generate_snapshots(
         raise DiagnosticOutputError(
             "diagnostics cannot write to the official data/portfolio directory"
         )
-    if not allow_phase_time_override and generation_mode != "recovery":
+    if not allow_phase_time_override and generation_mode == "live":
         for phase in phases:
             validate_phase_time(phase, now)
 
@@ -1058,11 +1105,26 @@ def generate_snapshots(
             portfolio=portfolio,
             now=now,
             allow_phase_time_override=allow_phase_time_override,
+            target_date=target_date,
             expected_data_date=expected_data_date,
             generation_mode=generation_mode,
         )
         output_path = output_dir / f"{phase}.json"
         write_payload(payload, output_path)
+        if (
+            phase in REPORT_PHASES
+            and not allow_phase_time_override
+            and output_dir.resolve() == OFFICIAL_OUTPUT_DIR.resolve()
+        ):
+            from scripts.portfolio_snapshot_store import persist_snapshot
+
+            result = persist_snapshot(
+                OFFICIAL_OUTPUT_DIR,
+                payload,
+                portfolio=portfolio,
+                now=now,
+            )
+            LOGGER.info("canonical snapshot: %s", result.canonical_path)
         LOGGER.info(
             "wrote %s (%d stocks, %d errors)",
             output_path,
@@ -1087,8 +1149,9 @@ def main() -> int:
             raise PhaseTimeError(
                 "all is diagnostics/tests only; use --allow-phase-time-override"
             )
-        recovery_run = args.phase == "close" and args.generation_mode == "recovery"
-        if not args.force and not recovery_run and not is_market_open("cn", now.date()):
+        target_date = args.target_date or now.date()
+        historical_run = args.generation_mode in {"recovery", "reconstructed"}
+        if not args.force and not historical_run and not is_market_open("cn", target_date):
             LOGGER.info(
                 "%s is not an A-share trading day; no portfolio files were updated",
                 now.date(),
@@ -1102,6 +1165,7 @@ def main() -> int:
             now=now,
             output_dir=output_dir,
             allow_phase_time_override=args.allow_phase_time_override,
+            target_date=target_date,
             expected_data_date=args.expected_data_date,
             generation_mode=args.generation_mode,
         )

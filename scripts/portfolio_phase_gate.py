@@ -31,7 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase", choices=("premarket", "midday", "close"), required=True)
     parser.add_argument("--target-date", type=date.fromisoformat)
     parser.add_argument("--expected-data-date", type=date.fromisoformat)
-    parser.add_argument("--generation-mode", choices=("live", "recovery"), default="live")
+    parser.add_argument(
+        "--generation-mode",
+        choices=("live", "recovery", "reconstructed"),
+        default="live",
+    )
     return parser.parse_args()
 
 

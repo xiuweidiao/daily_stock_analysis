@@ -212,10 +212,9 @@ def test_normal_and_watchdog_close_share_concurrency_group() -> None:
         ".github/workflows/portfolio-close-watchdog.yml"
     ).read_text(encoding="utf-8")
 
-    expected = "portfolio-market-data-${{ github.ref }}-close"
+    expected = "portfolio-snapshot-writer-${{ github.ref }}"
     assert expected in watchdog
-    assert "portfolio-market-data-${{ github.ref }}-" in normal
-    assert "${{ needs.resolve_phase.outputs.phase }}" in normal
+    assert expected in normal
     assert "remote_is_fresh" in watchdog
     assert "Verify final remote close" in watchdog
 

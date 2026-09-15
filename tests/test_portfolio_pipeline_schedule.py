@@ -51,7 +51,6 @@ def test_scheduled_phase_wait_plan(
 @pytest.mark.parametrize(
     ("phase", "started_at"),
     (
-        ("premarket", datetime(2026, 8, 17, 9, 25, tzinfo=SHANGHAI)),
         ("midday", datetime(2026, 8, 17, 13, 1, tzinfo=SHANGHAI)),
         ("close", datetime(2026, 8, 17, 18, 0, tzinfo=SHANGHAI)),
     ),
@@ -389,10 +388,7 @@ def test_workflow_waits_then_validates_before_phase_scoped_commit() -> None:
         "Commit updated snapshot safely"
     )
     assert "if: steps.contract.outputs.generated == 'true'" in workflow
-    assert 'git add -- "$snapshot"' in workflow
+    assert "git add -- data/portfolio" in workflow
     assert "--allow-phase-time-override" not in workflow
     assert "git pull --rebase origin" in workflow
-    assert (
-        "group: portfolio-market-data-${{ github.ref }}-"
-        "${{ needs.resolve_phase.outputs.phase }}"
-    ) in workflow
+    assert "group: portfolio-snapshot-writer-${{ github.ref }}" in workflow
