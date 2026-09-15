@@ -1,0 +1,39 @@
+{
+  "schema_version": "2.0",
+  "trading_date": "2026-09-14",
+  "expected_phases": [
+    "premarket",
+    "midday",
+    "close"
+  ],
+  "phases": {
+    "premarket": {
+      "lifecycle_status": "available",
+      "snapshot_status": "partial",
+      "completeness": "partial",
+      "generation_mode": "recovery",
+      "snapshot_as_of": "2026-09-11T15:00:00+08:00",
+      "path": "data/portfolio/snapshots/2026-09-14/premarket.json",
+      "reason": null
+    },
+    "midday": {
+      "lifecycle_status": "available",
+      "snapshot_status": "partial",
+      "completeness": "partial",
+      "generation_mode": "reconstructed",
+      "snapshot_as_of": "2026-09-14T11:30:00+08:00",
+      "path": "data/portfolio/snapshots/2026-09-14/midday.json",
+      "reason": null
+    },
+    "close": {
+      "lifecycle_status": "available",
+      "snapshot_status": "partial",
+      "completeness": "partial",
+      "generation_mode": "recovery",
+      "snapshot_as_of": "2026-09-14T15:00:00+08:00",
+      "path": "data/portfolio/snapshots/2026-09-14/close.json",
+      "reason": null
+    }
+  },
+  "updated_at": "2026-09-15T19:12:01.648966+08:00"
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": "2.0",
+  "trading_date": "2026-09-15",
+  "captured_at": "2026-09-15T19:12:01.648966+08:00",
+  "source_type": "frozen",
+  "confidence": "authoritative",
+  "source_commit": null,
+  "holdings_codes": [
+    "688825",
+    "300442",
+    "688012",
+    "300604",
+    "300274",
+    "159567",
+    "159967"
+  ],
+  "watchlist_codes": [],
+  "universe_hash": "fb42f34e6ed3330b81025e4448cf81dad0a8c313e901e21af306c17d9a781c86",
+  "frozen": true
+}
