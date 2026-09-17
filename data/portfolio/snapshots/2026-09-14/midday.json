@@ -3,14 +3,13 @@
   "trading_date": "2026-09-14",
   "market_phase": "midday",
   "snapshot_kind": "morning_close",
-  "snapshot_as_of": "2026-09-14T11:30:00+08:00",
-  "generated_at": "2026-09-15T19:12:01.648966+08:00",
+  "generated_at": "2026-09-17T23:17:21.661030+08:00",
   "timezone": "Asia/Shanghai",
   "generation_mode": "reconstructed",
   "data_date": "2026-09-14",
   "status": "partial",
   "completeness": "partial",
-  "portfolio_status": "ok",
+  "portfolio_status": "partial",
   "holdings_codes": [
     "688825",
     "300442",
@@ -54,13 +53,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -104,13 +103,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -153,13 +152,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -202,13 +201,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -251,13 +250,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -300,13 +299,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:51:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:50:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -349,13 +348,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:52:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:52:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -401,13 +400,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -451,13 +450,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -500,13 +499,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -549,13 +548,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -598,13 +597,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:53:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:53:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -647,13 +646,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:51:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:50:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -696,13 +695,13 @@
         "volume_ratio": null,
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T13:52:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T13:52:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -733,13 +732,13 @@
         "intraday": "sina_stock_zh_a_minute",
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T14:02:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T14:02:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -764,13 +763,13 @@
         "intraday": "sina_stock_zh_a_minute",
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T14:02:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T14:02:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -795,13 +794,13 @@
         "intraday": "sina_stock_zh_a_minute",
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T14:02:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T14:02:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -826,13 +825,13 @@
         "intraday": "sina_stock_zh_a_minute",
         "requested_date": "2026-09-14",
         "actual_range": [
-          "2026-09-03T14:02:00+08:00",
-          "2026-09-15T15:00:00+08:00"
+          "2026-09-07T14:02:00+08:00",
+          "2026-09-17T15:00:00+08:00"
         ],
         "interval": "1m",
         "timestamp_semantics": "bar_end"
       },
-      "fetched_at": "2026-09-15T19:12:01.648966+08:00",
+      "fetched_at": "2026-09-17T23:17:21.661030+08:00",
       "provider_timestamp": "2026-09-14T11:30:00+08:00",
       "data_timestamp": "2026-09-14T11:30:00+08:00",
       "freshness_status": "fresh",
@@ -847,7 +846,114 @@
     "requested_date": "2026-09-14",
     "interval": "1m",
     "timestamp_semantics": "bar_end",
-    "reconstructed_at": "2026-09-15T19:12:01.648966+08:00"
+    "reconstructed_at": "2026-09-17T23:17:21.661030+08:00"
+  },
+  "snapshot_as_of": "2026-09-14T11:30:00+08:00",
+  "information_cutoff": "2026-09-14T11:30:00+08:00",
+  "blocking": false,
+  "warnings": [
+    {
+      "scope": "stock",
+      "reason": "insufficient_history",
+      "code": "688825",
+      "field": "MA60"
+    },
+    {
+      "scope": "stock",
+      "reason": "insufficient_history",
+      "code": "688825",
+      "field": "return_60d"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688825",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688825",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300442",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300442",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688012",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688012",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300604",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300604",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300274",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300274",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159567",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159567",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159967",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159967",
+      "field": "turnover_rate"
+    }
+  ],
+  "data_quality": {
+    "blocking": false,
+    "warnings_count": 16,
+    "errors_count": 0,
+    "errors": []
   },
   "universe": {
     "path": "data/portfolio/universe/2026-09-14.json",

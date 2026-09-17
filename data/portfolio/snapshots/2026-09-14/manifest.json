@@ -13,6 +13,9 @@
       "completeness": "partial",
       "generation_mode": "recovery",
       "snapshot_as_of": "2026-09-11T15:00:00+08:00",
+      "information_cutoff": "2026-09-14T08:50:00+08:00",
+      "blocking": false,
+      "warnings_count": 16,
       "path": "data/portfolio/snapshots/2026-09-14/premarket.json",
       "reason": null
     },
@@ -22,6 +25,9 @@
       "completeness": "partial",
       "generation_mode": "reconstructed",
       "snapshot_as_of": "2026-09-14T11:30:00+08:00",
+      "information_cutoff": "2026-09-14T11:30:00+08:00",
+      "blocking": false,
+      "warnings_count": 16,
       "path": "data/portfolio/snapshots/2026-09-14/midday.json",
       "reason": null
     },
@@ -31,9 +37,12 @@
       "completeness": "partial",
       "generation_mode": "recovery",
       "snapshot_as_of": "2026-09-14T15:00:00+08:00",
+      "information_cutoff": "2026-09-14T15:00:00+08:00",
+      "blocking": false,
+      "warnings_count": 16,
       "path": "data/portfolio/snapshots/2026-09-14/close.json",
       "reason": null
     }
   },
-  "updated_at": "2026-09-15T19:12:01.648966+08:00"
+  "updated_at": "2026-09-17T23:17:21.661030+08:00"
 }
