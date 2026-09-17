@@ -19,6 +19,7 @@ from scripts.portfolio_close_readiness import (
 )
 from scripts.portfolio_config import PortfolioConfig
 from scripts.portfolio_phase_policy import plan_scheduled_phase
+from tests.portfolio_snapshot_test_utils import finalize_snapshot_fixture
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -40,7 +41,7 @@ CORE_QUOTE = {
 
 
 def _close_payload(generated_at: datetime, data_date: date) -> dict:
-    return {
+    payload = {
         "generated_at": generated_at.isoformat(),
         "timezone": "Asia/Shanghai",
         "market_phase": "close",
@@ -73,6 +74,14 @@ def _close_payload(generated_at: datetime, data_date: date) -> dict:
         ],
         "errors": [],
     }
+    return finalize_snapshot_fixture(
+        payload,
+        phase="close",
+        portfolio=PORTFOLIO,
+        trading_date=data_date,
+        data_date=data_date,
+        generated_at=generated_at,
+    )
 
 
 def _write(path: Path, payload: dict) -> None:

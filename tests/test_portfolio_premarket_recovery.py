@@ -23,6 +23,7 @@ from scripts.validate_portfolio_snapshot import (
     SnapshotContractError,
     validate_snapshot_contract,
 )
+from tests.portfolio_snapshot_test_utils import finalize_snapshot_fixture
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -54,7 +55,7 @@ def _premarket_payload(generated_at: datetime, data_date: date) -> dict:
                 **CORE_QUOTE,
             }
         )
-    return {
+    payload = {
         "generated_at": generated_at.isoformat(),
         "timezone": "Asia/Shanghai",
         "market_phase": "premarket",
@@ -68,6 +69,14 @@ def _premarket_payload(generated_at: datetime, data_date: date) -> dict:
         ],
         "errors": [],
     }
+    return finalize_snapshot_fixture(
+        payload,
+        phase="premarket",
+        portfolio=PORTFOLIO,
+        trading_date=generated_at.date(),
+        data_date=data_date,
+        generated_at=generated_at,
+    )
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -256,14 +265,15 @@ def test_generated_stale_snapshot_fails_formal_validator() -> None:
     generated_at = datetime(2026, 8, 26, 7, 7, tzinfo=SHANGHAI)
     payload = _premarket_payload(generated_at, date(2026, 8, 25))
 
-    with pytest.raises(
-        SnapshotContractError, match="generated_at is not the target date"
-    ):
+    with pytest.raises(SnapshotContractError, match="trading_date"):
         validate_snapshot_contract(
             payload,
             phase="premarket",
             portfolio=PORTFOLIO,
             now=datetime(2026, 8, 27, 7, 7, tzinfo=SHANGHAI),
+            target_date=date(2026, 8, 27),
+            expected_data_date=date(2026, 8, 26),
+            max_generation_age=None,
         )
 
 

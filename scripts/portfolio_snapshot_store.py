@@ -225,6 +225,9 @@ def _manifest(root: Path, trading_date: date) -> dict[str, Any]:
                     "completeness": None,
                     "generation_mode": None,
                     "snapshot_as_of": None,
+                    "information_cutoff": None,
+                    "blocking": None,
+                    "warnings_count": 0,
                     "path": None,
                     "reason": None,
                 }
@@ -239,7 +242,7 @@ def _manifest(root: Path, trading_date: date) -> dict[str, Any]:
 
 
 def _as_of(payload: Mapping[str, Any]) -> datetime | None:
-    value = payload.get("snapshot_as_of") or payload.get("generated_at")
+    value = payload.get("snapshot_as_of")
     if not isinstance(value, str):
         return None
     try:
@@ -378,6 +381,13 @@ def persist_snapshot(
         "completeness": canonical.get("completeness", "full"),
         "generation_mode": canonical.get("generation_mode", "live"),
         "snapshot_as_of": canonical.get("snapshot_as_of"),
+        "information_cutoff": canonical.get("information_cutoff"),
+        "blocking": canonical.get("blocking"),
+        "warnings_count": (
+            canonical.get("data_quality", {}).get("warnings_count", 0)
+            if isinstance(canonical.get("data_quality"), Mapping)
+            else 0
+        ),
         "path": str(relative),
         "reason": None,
     }
@@ -407,6 +417,9 @@ def record_phase_issue(
         "completeness": None,
         "generation_mode": None,
         "snapshot_as_of": None,
+        "information_cutoff": None,
+        "blocking": None,
+        "warnings_count": 0,
         "path": None,
         "reason": reason,
     }

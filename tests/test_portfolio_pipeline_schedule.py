@@ -13,9 +13,11 @@ from scripts.validate_portfolio_snapshot import (
     SnapshotContractError,
     validate_snapshot_contract,
 )
+from tests.portfolio_snapshot_test_utils import finalize_snapshot_fixture
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+PORTFOLIO = PortfolioConfig(version=1, holdings=("159567",), watchlist=("600519",))
 CORE_QUOTE = {
     "latest_price": 10.2,
     "prev_close": 10.0,
@@ -130,7 +132,7 @@ def test_workflow_crons_convert_to_intended_shanghai_queue_times() -> None:
 
 
 def _payload(phase: str, generated_at: datetime, data_date: date) -> dict:
-    return {
+    payload = {
         "generated_at": generated_at.isoformat(),
         "timezone": "Asia/Shanghai",
         "market_phase": phase,
@@ -160,6 +162,14 @@ def _payload(phase: str, generated_at: datetime, data_date: date) -> dict:
         ],
         "errors": [],
     }
+    return finalize_snapshot_fixture(
+        payload,
+        phase=phase,
+        portfolio=PORTFOLIO,
+        trading_date=generated_at.date(),
+        data_date=data_date,
+        generated_at=generated_at,
+    )
 
 
 @pytest.mark.parametrize(
@@ -210,14 +220,15 @@ def test_old_snapshot_is_not_accepted_as_current_fallback() -> None:
     payload = _payload("midday", generated_at, date(2026, 8, 17))
     portfolio = PortfolioConfig(version=1, holdings=("159567",), watchlist=("600519",))
 
-    with pytest.raises(
-        SnapshotContractError, match="generated_at is not the target date"
-    ):
+    with pytest.raises(SnapshotContractError, match="trading_date"):
         validate_snapshot_contract(
             payload,
             phase="midday",
             portfolio=portfolio,
             now=datetime(2026, 8, 18, 11, 35, tzinfo=SHANGHAI),
+            target_date=date(2026, 8, 18),
+            expected_data_date=date(2026, 8, 18),
+            max_generation_age=None,
         )
 
 
@@ -254,6 +265,14 @@ def test_snapshot_contract_rejects_null_core_quote_fields(field: str) -> None:
     portfolio = PortfolioConfig(
         version=1, holdings=("159567",), watchlist=("600519",)
     )
+    finalize_snapshot_fixture(
+        payload,
+        phase="close",
+        portfolio=portfolio,
+        trading_date=generated_at.date(),
+        data_date=generated_at.date(),
+        generated_at=generated_at,
+    )
 
     with (
         patch("scripts.validate_portfolio_snapshot.is_market_open", return_value=True),
@@ -283,6 +302,14 @@ def test_snapshot_contract_rejects_non_finite_latest_price(value: object) -> Non
     payload["stocks"][0]["latest_price"] = value
     portfolio = PortfolioConfig(
         version=1, holdings=("159567",), watchlist=("600519",)
+    )
+    finalize_snapshot_fixture(
+        payload,
+        phase="close",
+        portfolio=portfolio,
+        trading_date=generated_at.date(),
+        data_date=generated_at.date(),
+        generated_at=generated_at,
     )
 
     with (
@@ -356,6 +383,14 @@ def test_snapshot_contract_allows_partial_short_history_indicators() -> None:
     )
     portfolio = PortfolioConfig(
         version=1, holdings=("159567",), watchlist=("600519",)
+    )
+    finalize_snapshot_fixture(
+        payload,
+        phase="close",
+        portfolio=portfolio,
+        trading_date=generated_at.date(),
+        data_date=generated_at.date(),
+        generated_at=generated_at,
     )
 
     with (

@@ -19,7 +19,12 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from scripts.portfolio_config import DEFAULT_CONFIG_PATH, PortfolioConfig, load_portfolio_config
 from scripts.portfolio_market_data import PHASES, TIMEZONE_NAME, _phase_data_date
-from scripts.portfolio_phase_policy import SHANGHAI_TZ, PhaseTimeError, validate_phase_time
+from scripts.portfolio_phase_policy import SHANGHAI_TZ
+from scripts.portfolio_snapshot_contract import (
+    assess_data_quality,
+    parse_contract_timestamp,
+    phase_business_times,
+)
 from src.core.trading_calendar import is_market_open
 
 
@@ -50,17 +55,10 @@ def _finite_numeric(value: Any) -> float | None:
 
 
 def _parse_generated_at(value: Any) -> datetime:
-    if not isinstance(value, str):
-        raise SnapshotContractError("generated_at must be an ISO-8601 string")
     try:
-        generated_at = datetime.fromisoformat(value)
+        return parse_contract_timestamp(value, "generated_at")
     except ValueError as exc:
-        raise SnapshotContractError("generated_at is not valid ISO-8601") from exc
-    if generated_at.tzinfo is None:
-        raise SnapshotContractError("generated_at must include a timezone offset")
-    if generated_at.utcoffset() != timedelta(hours=8):
-        raise SnapshotContractError("generated_at must use the Asia/Shanghai UTC+08:00 offset")
-    return generated_at.astimezone(SHANGHAI_TZ)
+        raise SnapshotContractError(str(exc)) from exc
 
 
 def validate_snapshot_contract(
@@ -85,8 +83,8 @@ def validate_snapshot_contract(
     if payload.get("schema_version") is not None:
         if payload.get("schema_version") != "2.0":
             raise SnapshotContractError("schema_version must be 2.0")
-        if payload.get("status") not in {"ok", "partial"}:
-            raise SnapshotContractError("status must be ok or partial for a data snapshot")
+        if payload.get("status") not in {"ok", "partial", "error"}:
+            raise SnapshotContractError("status must be ok, partial or error")
         if payload.get("completeness") not in {"full", "partial"}:
             raise SnapshotContractError("completeness must be full or partial")
         if target_date is not None and payload.get("trading_date") != target_date.isoformat():
@@ -121,7 +119,16 @@ def validate_snapshot_contract(
         raise SnapshotContractError(
             f"generation_mode must be {generation_mode}, got {payload_mode!r}"
         )
-    expected_date = expected_data_date or _phase_data_date(phase, generated_at)
+    target_reference = datetime.combine(
+        expected_target_date,
+        time(8, 0) if phase == "premarket" else time(15, 5),
+        SHANGHAI_TZ,
+    )
+    expected_date = expected_data_date or (
+        _phase_data_date("premarket", target_reference)
+        if phase == "premarket"
+        else expected_target_date
+    )
     if payload.get("schema_version") == "2.0":
         expected_kind = {
             "premarket": "previous_close_context",
@@ -131,15 +138,33 @@ def validate_snapshot_contract(
         }[phase]
         if payload.get("snapshot_kind") != expected_kind:
             raise SnapshotContractError(f"snapshot_kind must be {expected_kind}")
-        snapshot_as_of = _parse_generated_at(payload.get("snapshot_as_of"))
-        if phase in {"premarket", "close"}:
-            expected_as_of = datetime.combine(
-                expected_date, time(15, 0), SHANGHAI_TZ
+        try:
+            snapshot_as_of = parse_contract_timestamp(
+                payload.get("snapshot_as_of"), "snapshot_as_of"
             )
-            if snapshot_as_of != expected_as_of:
-                raise SnapshotContractError(
-                    f"{phase} snapshot_as_of must be the official 15:00 close"
-                )
+            information_cutoff = parse_contract_timestamp(
+                payload.get("information_cutoff"), "information_cutoff"
+            )
+        except ValueError as exc:
+            raise SnapshotContractError(str(exc)) from exc
+        expected_as_of, expected_cutoff = phase_business_times(
+            phase,
+            trading_date=expected_target_date,
+            data_date=expected_date,
+            generated_at=generated_at,
+        )
+        if snapshot_as_of != expected_as_of:
+            raise SnapshotContractError(
+                f"{phase} snapshot_as_of does not match its business time"
+            )
+        if information_cutoff != expected_cutoff:
+            raise SnapshotContractError(
+                f"{phase} information_cutoff does not match its report cutoff"
+            )
+        if generated_at < snapshot_as_of:
+            raise SnapshotContractError(
+                "generated_at cannot precede the represented market snapshot"
+            )
     if mode == "recovery" and phase == "close":
         earliest_recovery = datetime.combine(
             expected_date, time(15, 0), SHANGHAI_TZ
@@ -159,7 +184,6 @@ def validate_snapshot_contract(
                 f"completed A-share trading day ({latest_completed_date})"
             )
     elif mode == "reconstructed":
-        snapshot_as_of = _parse_generated_at(payload.get("snapshot_as_of"))
         expected_as_of = datetime.combine(
             expected_target_date, time(11, 30), SHANGHAI_TZ
         )
@@ -171,15 +195,6 @@ def validate_snapshot_contract(
             raise SnapshotContractError(
                 "reconstructed midday generated_at cannot precede snapshot_as_of"
             )
-    else:
-        if generated_at.date() != expected_target_date:
-            raise SnapshotContractError(
-                "current snapshot unavailable: generated_at is not the target date"
-            )
-        try:
-            validate_phase_time(phase, generated_at)
-        except PhaseTimeError as exc:
-            raise SnapshotContractError(str(exc)) from exc
     generation_age = current - generated_at
     if generation_age < -timedelta(minutes=1):
         raise SnapshotContractError("generated_at cannot be in the future")
@@ -295,7 +310,40 @@ def validate_snapshot_contract(
     if actual_benchmark_codes != expected_benchmark_codes:
         raise SnapshotContractError("benchmarks must contain the four required indexes")
 
-    expected_status = "ok" if expected_tracking else "empty"
+    assessment = assess_data_quality(
+        payload,
+        phase=phase,
+        portfolio=portfolio,
+        trading_date=expected_target_date,
+        expected_data_date=expected_date,
+    )
+    if assessment["blocking"]:
+        first_error = assessment["errors"][0]
+        raise SnapshotContractError(
+            "blocking data-quality error: "
+            f"{first_error.get('reason')} ({first_error.get('field', first_error.get('scope'))})"
+        )
+    if payload.get("blocking") is not False:
+        raise SnapshotContractError("blocking must be false for a usable formal snapshot")
+    if payload.get("warnings") != assessment["warnings"]:
+        raise SnapshotContractError("warnings do not match computed data quality")
+    data_quality = payload.get("data_quality")
+    if not isinstance(data_quality, Mapping):
+        raise SnapshotContractError("data_quality must be an object")
+    expected_quality = {
+        "blocking": False,
+        "warnings_count": len(assessment["warnings"]),
+        "errors_count": 0,
+        "errors": [],
+    }
+    if dict(data_quality) != expected_quality:
+        raise SnapshotContractError("data_quality does not match computed data quality")
+
+    expected_status = (
+        "empty"
+        if not expected_tracking
+        else "partial" if assessment["warnings"] else "ok"
+    )
     if payload.get("portfolio_status") != expected_status:
         raise SnapshotContractError(f"portfolio_status must be {expected_status}")
 

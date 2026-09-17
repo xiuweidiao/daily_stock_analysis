@@ -31,6 +31,7 @@ from scripts.validate_portfolio_snapshot import (
     SnapshotContractError,
     validate_snapshot_contract,
 )
+from tests.portfolio_snapshot_test_utils import finalize_snapshot_fixture
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -79,7 +80,14 @@ def _payload(
     }
     if generation_mode:
         payload["generation_mode"] = generation_mode
-    return payload
+    return finalize_snapshot_fixture(
+        payload,
+        phase=phase,
+        portfolio=PORTFOLIO,
+        trading_date=data_date if phase == "close" else generated_at.date(),
+        data_date=data_date,
+        generated_at=generated_at,
+    )
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -505,7 +513,7 @@ def test_premarket_recovery_contract_rejects_wrong_payload_data_date() -> None:
         generation_mode="recovery",
     )
 
-    with pytest.raises(SnapshotContractError, match="data_date must be 2026-08-31"):
+    with pytest.raises(SnapshotContractError, match="snapshot_as_of"):
         validate_snapshot_contract(
             payload,
             phase="premarket",
