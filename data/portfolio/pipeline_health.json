@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "checked_at": "2026-09-17T16:53:31.514368+08:00",
+  "checked_at": "2026-09-17T19:21:27.819966+08:00",
   "latest_trading_date": "2026-09-17",
   "manifest_path": "data/portfolio/snapshots/2026-09-17/manifest.json",
   "status": "degraded",
@@ -27,12 +27,15 @@
       "reason": null
     },
     "close": {
-      "lifecycle_status": "pending",
-      "snapshot_status": null,
-      "completeness": null,
-      "generation_mode": null,
-      "snapshot_as_of": null,
-      "path": null,
+      "lifecycle_status": "available",
+      "snapshot_status": "partial",
+      "completeness": "partial",
+      "generation_mode": "recovery",
+      "snapshot_as_of": "2026-09-17T15:00:00+08:00",
+      "information_cutoff": "2026-09-17T15:00:00+08:00",
+      "blocking": false,
+      "warnings_count": 16,
+      "path": "data/portfolio/snapshots/2026-09-17/close.json",
       "reason": null
     }
   },
@@ -43,6 +46,10 @@
     },
     {
       "phase": "midday",
+      "reason": "CORE_FIELDS_UNAVAILABLE"
+    },
+    {
+      "phase": "close",
       "reason": "CORE_FIELDS_UNAVAILABLE"
     }
   ],
