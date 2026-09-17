@@ -18,7 +18,7 @@
 - `close` live：`15:00 <= time < 18:00`；若 scheduled run 严重迟到，允许以 `recovery` 模式在窗口后补齐最近一个已完成交易日；
 - `intraday`：`09:30 <= time <= 11:30` 或 `13:00 <= time < 15:00`。
 
-cron slot 只标识 phase、目标业务日期并计算 lateness，不再决定数据生命周期。workflow 先检查 freshness；stale/missing/invalid 时优先 live，随后选择真实 recovery/reconstruction。premarket 迟到后只读上一完成交易日日线；midday 超窗后只读目标交易日 11:30 历史分钟线；close 从目标交易日 15:05 起保持可恢复。`generated_at` 始终是真实生成时间，`snapshot_as_of` 才是数据代表的市场时间。
+cron slot 只标识 phase、目标业务日期并计算 lateness，不再决定数据生命周期。workflow 先检查 freshness；stale/missing/invalid 时优先 live，随后选择真实 recovery/reconstruction。premarket 迟到后只读上一完成交易日日线；midday 超窗后只读目标交易日 11:30 历史分钟线；close 从目标交易日 15:05 起保持可恢复。`generated_at` 只表示程序实际完成时间，`snapshot_as_of` 表示行情实际代表的市场时点，`information_cutoff` 表示阶段报告允许使用外部信息的截止时间；三者不得互相替代。
 
 ## 持仓与关注配置
 
@@ -120,9 +120,9 @@ Portfolio snapshot 写入者共用一个 concurrency group，因为 manifest、h
 
 正式链路使用明确状态码：`SNAPSHOT_ALREADY_FRESH`、`RECOVERY_REQUIRED`、`RECONSTRUCTION_REQUIRED`、`SNAPSHOT_GENERATED`、`SNAPSHOT_RECONSTRUCTED`、`SNAPSHOT_MISSED`、`GENERATION_FAILED`、`SNAPSHOT_CONTRACT_FAILED`、`REMOTE_SNAPSHOT_ALREADY_FRESH`、`FINAL_SNAPSHOT_NOT_FRESH`、`NON_TRADING_DAY`。`SCHEDULE_MISSED_PHASE_WINDOW` 不再参与生成决策。
 
-新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、目标交易日、`snapshot_as_of`、真实 `generated_at`、`data_date`、当日冻结证券池及 `tracking_type` 必须一致。live 快照仍受阶段时间窗口约束；recovery/reconstructed 必须验证完整日线或精确 11:30 分钟线，不伪造生成时间。配置证券池非空时 `stocks` 不得整体缺失。
+新 JSON 在 commit 前必须通过正式契约校验：`market_phase`、`timezone`、目标交易日、`snapshot_as_of`、`information_cutoff`、真实 `generated_at`、`data_date`、当日冻结证券池及 `tracking_type` 必须一致。phase gate 决定当前是否允许 live 抓取；正式 snapshot contract 根据业务时点而不是 runner 启动时间判断数据是否正确。recovery/reconstructed 必须验证完整日线或精确 11:30 分钟线，不得只修改时间字段来伪造重建。配置证券池非空时 `stocks` 不得整体缺失。
 
-下游不应将“文件存在”视为“今日可用”，必须同时校验 `generated_at + data_date + market_phase`。根据当前 GitHub Actions 已观测的延迟与约 4–5 分钟数据生成耗时，建议午盘报告约 `11:45` 读取，收盘报告约 `15:25` 读取；仍需先做上述契约判断，不应假设 Actions 绝对准时。
+下游不应将“文件存在”视为“今日可用”，必须校验 `snapshot_as_of + information_cutoff + data_date + market_phase + blocking`。`generated_at` 仅用于审计文件何时生成，不再用于判断业务数据是否 stale。根据当前 GitHub Actions 已观测的延迟与约 4–5 分钟数据生成耗时，建议午盘报告约 `11:45` 读取，收盘报告约 `15:25` 读取；仍需先做上述契约判断，不应假设 Actions 绝对准时。
 
 ### 消费前 readiness 检查
 
@@ -134,7 +134,7 @@ python scripts/check_portfolio_snapshot_ready.py --phase midday
 python scripts/check_portfolio_snapshot_ready.py --phase close
 ```
 
-脚本只读取 `data/portfolio/{phase}.json` 和 `config/portfolio.json`，不会抓取行情、修改或删除 snapshot，也不会创建另一套行情管道。`ready=true` 仅在文件存在，阶段、时区、目标业务日期、预期 `data_date`、配置证券池和完整正式 snapshot contract 全部通过时返回；close recovery 的 `generated_at` 可以晚于 `data_date`，但必须是真实生成时间且不得早于目标交易日收盘。消费者以 JSON 中的 `ready` 为判断依据；旧于期望交易日的文件返回 `stale_snapshot`，文件不存在返回 `missing_snapshot`，其余契约错误统一返回 `invalid_snapshot`。旧文件不会被删除或冒充新数据。
+脚本只读取 `data/portfolio/{phase}.json` 和 `config/portfolio.json`，不会抓取行情、修改或删除 snapshot，也不会创建另一套行情管道。`ready=true` 仅在文件存在，阶段、时区、目标业务日期、预期 `data_date`、`snapshot_as_of`、`information_cutoff`、配置证券池、`blocking=false` 和完整正式 snapshot contract 全部通过时返回。迟到重建允许 `generated_at` 晚于业务时点；消费者以 `snapshot_as_of` 判断行情时点。旧于期望交易日的文件返回 `stale_snapshot`，文件不存在返回 `missing_snapshot`，其余契约错误统一返回 `invalid_snapshot`。旧文件不会被删除或冒充新数据。
 
 推荐读取与重试策略：
 
@@ -142,7 +142,7 @@ python scripts/check_portfolio_snapshot_ready.py --phase close
 - midday：建议 11:45 开始读取；未 ready 时每 5 分钟重试，最晚到 12:15；
 - close：建议 15:25 开始读取；未 ready 时每 5 分钟重试，最晚到 16:00。
 
-readiness 检查复用正式 validator，但不使用“生成后 30 分钟内”这一 commit 阶段限制，因此合法 midday 快照在 12:15 仍可判定 ready；日期、阶段窗口、证券池、核心行情字段和基准契约不会放宽。close readiness 按最近已完成交易日判断，允许识别晚生成但契约合法的 recovery 文件。
+readiness 检查复用正式 validator，但不使用“生成后 30 分钟内”这一仅用于防止 workflow 提交旧产物的操作性限制，因此合法 midday 重建即使在下午完成仍可判定 ready；日期、业务时点、证券池、核心行情字段和基准契约不会放宽。close readiness 按最近已完成交易日判断，允许识别晚生成但契约合法的 recovery 文件。
 
 PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.github/requirements-portfolio-pipeline.txt`，再执行 `pip check` 和 `python scripts/portfolio_market_data.py --help`，用于阻止轻量依赖清单与实际启动 import 链再次漂移。
 
@@ -179,5 +179,5 @@ PR 中的 `Portfolio Market Data Smoke` 使用干净 Python 3.11，只安装 `.g
 - 多数免费实时源不提供供应商原始时间，此时 `provider_timestamp` 和 `data_timestamp` 为 `null`，`freshness_status` 为 `unknown`；只能确认 `fetched_at` 是抓取时间。
 - 阶段窗口只保护报告语义，不判断上游免费源是否延迟；是否可用仍应结合 `provider_timestamp`、`freshness_status` 和 `status` 判断。
 - workflow 向当前分支提交 JSON；若目标分支保护规则禁止 GitHub Actions 直接推送，需要仓库管理员允许该 bot，或改为由独立 PR 接收快照更新。
-- 多 cron 能降低单次 scheduled event 被 dropped 的风险，但 GitHub Scheduler 仍可能同时延迟或丢弃多个 event；仓库代码无法承诺绝对准时。premarket/midday 一旦所有 fallback 都晚于业务 cutoff，只能明确失败，不能事后伪造时点快照。
+- 多 cron 能降低单次 scheduled event 被 dropped 的风险，但 GitHub Scheduler 仍可能同时延迟或丢弃多个 event；仓库代码无法承诺绝对准时。premarket 可从上一正式收盘日线恢复，midday 仅在免费分钟历史仍包含目标日精确 11:30 bar 时恢复；取不到真实历史时必须记录 missed，不能用当前行情或改写时间戳冒充。
 - close watchdog 将恢复判断从“某个 close cron 是否准时”改成“目标交易日的合法 close 是否已存在”，但 GitHub 仍可能同时丢弃主 workflow 和全部 watchdog event；此时只能通过 `workflow_dispatch phase=close` 或手动触发 watchdog 恢复。

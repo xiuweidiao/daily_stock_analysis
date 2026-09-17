@@ -9,7 +9,7 @@
   "data_date": "2026-09-16",
   "status": "partial",
   "completeness": "partial",
-  "portfolio_status": "ok",
+  "portfolio_status": "partial",
   "holdings_codes": [
     "688825",
     "300442",
@@ -651,5 +651,111 @@
     "hash": "fb42f34e6ed3330b81025e4448cf81dad0a8c313e901e21af306c17d9a781c86",
     "source_type": "frozen",
     "confidence": "authoritative"
+  },
+  "information_cutoff": "2026-09-16T15:00:00+08:00",
+  "blocking": false,
+  "warnings": [
+    {
+      "scope": "stock",
+      "reason": "insufficient_history",
+      "code": "688825",
+      "field": "MA60"
+    },
+    {
+      "scope": "stock",
+      "reason": "insufficient_history",
+      "code": "688825",
+      "field": "return_60d"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688825",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688825",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300442",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300442",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688012",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "688012",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300604",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300604",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300274",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "300274",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159567",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159567",
+      "field": "turnover_rate"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159967",
+      "field": "volume_ratio"
+    },
+    {
+      "scope": "stock",
+      "reason": "optional_field_unavailable",
+      "code": "159967",
+      "field": "turnover_rate"
+    }
+  ],
+  "data_quality": {
+    "blocking": false,
+    "warnings_count": 16,
+    "errors_count": 0,
+    "errors": []
   }
 }

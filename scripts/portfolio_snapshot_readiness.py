@@ -28,7 +28,6 @@ from scripts.portfolio_schedule_context import build_schedule_context
 from scripts.portfolio_snapshot_store import portfolio_from_universe
 from scripts.validate_portfolio_snapshot import (
     SnapshotContractError,
-    _parse_generated_at,
     validate_snapshot_contract,
 )
 from src.core.trading_calendar import is_market_open
@@ -43,9 +42,12 @@ class SnapshotReadiness:
     state_code: str
     freshness: str
     generated_at: str | None
+    snapshot_as_of: str | None
+    information_cutoff: str | None
     data_date: str | None
     market_phase: str | None
     portfolio_status: str | None
+    blocking: bool | None
     expected_data_date: str
     target_date: str
     current_beijing_time: str
@@ -97,6 +99,16 @@ def _result(
             if isinstance(payload.get("generated_at"), str)
             else None
         ),
+        snapshot_as_of=(
+            payload.get("snapshot_as_of")
+            if isinstance(payload.get("snapshot_as_of"), str)
+            else None
+        ),
+        information_cutoff=(
+            payload.get("information_cutoff")
+            if isinstance(payload.get("information_cutoff"), str)
+            else None
+        ),
         data_date=(
             payload.get("data_date")
             if isinstance(payload.get("data_date"), str)
@@ -110,6 +122,11 @@ def _result(
         portfolio_status=(
             payload.get("portfolio_status")
             if isinstance(payload.get("portfolio_status"), str)
+            else None
+        ),
+        blocking=(
+            payload.get("blocking")
+            if isinstance(payload.get("blocking"), bool)
             else None
         ),
         expected_data_date=expected_data_date.isoformat(),
@@ -170,30 +187,13 @@ def inspect_snapshot(
             **common,
         )
 
-    try:
-        generated_at = _parse_generated_at(payload.get("generated_at"))
-    except SnapshotContractError:
-        generated_at = None
-    if phase in {"premarket", "midday"} and generated_at is not None:
-        if generated_at.date() < target_date:
-            return _result(
-                fresh=False,
-                should_generate=True,
-                reason="stale_snapshot",
-                **common,
-            )
-
     payload_data_date = payload.get("data_date")
     if isinstance(payload_data_date, str):
         try:
             parsed_data_date = date.fromisoformat(payload_data_date)
         except ValueError:
             parsed_data_date = None
-        if (
-            phase == "close"
-            and parsed_data_date is not None
-            and parsed_data_date < expected_data_date
-        ):
+        if parsed_data_date is not None and parsed_data_date < expected_data_date:
             return _result(
                 fresh=False,
                 should_generate=True,

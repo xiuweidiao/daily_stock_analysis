@@ -20,6 +20,7 @@ from scripts.portfolio_close_watchdog import (
 from scripts.portfolio_config import PortfolioConfig
 from scripts.portfolio_schedule_context import build_schedule_context
 from scripts.portfolio_schedule_map import WATCHDOG_CLOSE_CRONS, resolve_phase
+from tests.portfolio_snapshot_test_utils import finalize_snapshot_fixture
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -42,7 +43,7 @@ def _payload(
     *,
     portfolio_status: str = "ok",
 ) -> dict:
-    return {
+    payload = {
         "generated_at": generated_at.isoformat(),
         "timezone": "Asia/Shanghai",
         "market_phase": "close",
@@ -64,6 +65,17 @@ def _payload(
         ],
         "errors": [],
     }
+    finalize_snapshot_fixture(
+        payload,
+        phase="close",
+        portfolio=PORTFOLIO,
+        trading_date=data_date,
+        data_date=data_date,
+        generated_at=generated_at,
+    )
+    if portfolio_status == "error":
+        payload["portfolio_status"] = "error"
+    return payload
 
 
 def _write(path: Path, payload: dict) -> None:

@@ -10,6 +10,7 @@ import pytest
 from scripts.check_portfolio_snapshot_ready import check_snapshot_ready, main
 from scripts.portfolio_config import PortfolioConfig
 from scripts.portfolio_market_data import _phase_data_date
+from tests.portfolio_snapshot_test_utils import finalize_snapshot_fixture
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -47,7 +48,7 @@ def _stable_trading_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _payload(phase: str, generated_at: datetime, data_date: date | None = None) -> dict:
     expected_date = data_date or _phase_data_date(phase, generated_at)
-    return {
+    payload = {
         "generated_at": generated_at.isoformat(),
         "timezone": "Asia/Shanghai",
         "market_phase": phase,
@@ -74,6 +75,14 @@ def _payload(phase: str, generated_at: datetime, data_date: date | None = None) 
         ],
         "errors": [],
     }
+    return finalize_snapshot_fixture(
+        payload,
+        phase=phase,
+        portfolio=PORTFOLIO,
+        trading_date=generated_at.date(),
+        data_date=expected_date,
+        generated_at=generated_at,
+    )
 
 
 def _write(path: Path, payload: dict) -> bytes:
@@ -163,10 +172,10 @@ def test_data_date_mismatch_is_not_ready(tmp_path: Path) -> None:
     )
 
     assert result.ready is False
-    assert result.reason == "invalid_snapshot"
+    assert result.reason == "stale_snapshot"
 
 
-def test_generated_at_outside_phase_window_is_not_ready(tmp_path: Path) -> None:
+def test_late_generated_at_does_not_make_business_snapshot_stale(tmp_path: Path) -> None:
     path = tmp_path / "midday.json"
     generated_at = datetime(2026, 8, 20, 13, 1, tzinfo=SHANGHAI)
     _write(path, _payload("midday", generated_at, date(2026, 8, 20)))
@@ -178,8 +187,9 @@ def test_generated_at_outside_phase_window_is_not_ready(tmp_path: Path) -> None:
         now=datetime(2026, 8, 20, 13, 5, tzinfo=SHANGHAI),
     )
 
-    assert result.ready is False
-    assert result.reason == "invalid_snapshot"
+    assert result.ready is True
+    assert result.reason == "ok"
+    assert result.snapshot_as_of == "2026-08-20T11:30:00+08:00"
 
 
 def test_missing_file_is_not_ready(tmp_path: Path) -> None:
@@ -262,5 +272,8 @@ def test_cli_outputs_structured_json(
         "ready": True,
         "reason": "ok",
         "generated_at": generated_at.isoformat(),
+        "snapshot_as_of": "2026-08-20T11:30:00+08:00",
+        "information_cutoff": "2026-08-20T11:30:00+08:00",
         "data_date": "2026-08-20",
+        "blocking": False,
     }

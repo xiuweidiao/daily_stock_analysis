@@ -34,7 +34,10 @@ class SnapshotReadiness:
     ready: bool
     reason: str
     generated_at: str | None
+    snapshot_as_of: str | None
+    information_cutoff: str | None
     data_date: str | None
+    blocking: bool | None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -55,9 +58,24 @@ def _not_ready(
             if payload and isinstance(payload.get("generated_at"), str)
             else None
         ),
+        snapshot_as_of=(
+            payload.get("snapshot_as_of")
+            if payload and isinstance(payload.get("snapshot_as_of"), str)
+            else None
+        ),
+        information_cutoff=(
+            payload.get("information_cutoff")
+            if payload and isinstance(payload.get("information_cutoff"), str)
+            else None
+        ),
         data_date=(
             payload.get("data_date")
             if payload and isinstance(payload.get("data_date"), str)
+            else None
+        ),
+        blocking=(
+            payload.get("blocking")
+            if payload and isinstance(payload.get("blocking"), bool)
             else None
         ),
     )
@@ -91,7 +109,10 @@ def check_snapshot_ready(
         ready=result.fresh,
         reason=reason,
         generated_at=result.generated_at,
+        snapshot_as_of=result.snapshot_as_of,
+        information_cutoff=result.information_cutoff,
         data_date=result.data_date,
+        blocking=result.blocking,
     )
 
 

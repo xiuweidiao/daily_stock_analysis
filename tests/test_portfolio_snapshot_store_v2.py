@@ -323,7 +323,7 @@ def test_midday_1152_wakeup_uses_exact_history_not_realtime_quote() -> None:
     assert context.generation_mode == "reconstructed"
 
 
-def test_missing_core_amount_makes_reconstructed_snapshot_partial() -> None:
+def test_missing_core_amount_makes_reconstructed_snapshot_blocking() -> None:
     payload = reconstruct_midday_snapshot(
         target_date=date(2026, 9, 14),
         portfolio=PORTFOLIO,
@@ -331,8 +331,10 @@ def test_missing_core_amount_makes_reconstructed_snapshot_partial() -> None:
         provider=FakeMinuteProvider(include_amount=False),
         now=datetime(2026, 9, 14, 17, 47, tzinfo=SHANGHAI),
     )
-    assert payload["status"] == "partial"
+    assert payload["status"] == "error"
     assert payload["completeness"] == "partial"
+    assert payload["portfolio_status"] == "error"
+    assert payload["blocking"] is True
 
 
 def test_reconstructed_contract_requires_real_1130_as_of() -> None:
@@ -355,7 +357,7 @@ def test_reconstructed_contract_requires_real_1130_as_of() -> None:
         generation_mode="reconstructed",
     )
     payload["snapshot_as_of"] = "2026-09-14T17:47:43+08:00"
-    with pytest.raises(SnapshotContractError, match="exactly 11:30"):
+    with pytest.raises(SnapshotContractError, match="snapshot_as_of"):
         validate_snapshot_contract(
             payload,
             phase="midday",

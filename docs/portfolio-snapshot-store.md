@@ -35,13 +35,24 @@ data/portfolio/
   "market_phase": "midday",
   "snapshot_kind": "morning_close",
   "snapshot_as_of": "2026-09-14T11:30:00+08:00",
+  "information_cutoff": "2026-09-14T11:30:00+08:00",
   "generated_at": "2026-09-14T17:47:43+08:00",
   "timezone": "Asia/Shanghai",
   "generation_mode": "reconstructed",
   "data_date": "2026-09-14",
   "status": "ok",
   "completeness": "partial",
-  "portfolio_status": "ok",
+  "portfolio_status": "partial",
+  "blocking": false,
+  "warnings": [
+    {"scope": "stock", "code": "688825", "field": "MA60", "reason": "insufficient_history"}
+  ],
+  "data_quality": {
+    "blocking": false,
+    "warnings_count": 1,
+    "errors_count": 0,
+    "errors": []
+  },
   "holdings_codes": ["688825"],
   "watchlist_codes": [],
   "holdings": [],
@@ -54,13 +65,22 @@ data/portfolio/
 ```
 
 `snapshot_as_of` is the real market instant represented by the data;
-`generated_at` is the real execution time. They are never substituted.
+`information_cutoff` is the latest external-information time allowed for that
+report phase; `generated_at` is only the real execution time. They are never
+substituted. A late `generated_at` does not make a correctly reconstructed
+business snapshot stale.
 
 `status` describes analytical usability. `completeness` describes optional
 field coverage. A reconstructed midday snapshot with complete price, morning
 OHLCV/amount, previous close, MA and return fields is therefore
 `status=ok, completeness=partial` when native `volume_ratio` or
 `turnover_rate` is unavailable.
+
+`blocking=false` means consumers may use the snapshot and surface its
+structured warnings. Missing long-history indicators are non-blocking;
+universe mismatches, wrong business dates/times, missing core quotes, required
+benchmark failures and corrupt structure are blocking and cannot be committed
+as a formal snapshot.
 
 Premarket remains `market_phase=premarket` for compatibility and sets
 `snapshot_kind=previous_close_context`. It represents the latest completed

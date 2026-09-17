@@ -407,7 +407,10 @@ jobs:
           fi
           echo "fresh=true" >> "$GITHUB_OUTPUT"
           echo "generated_at=$(printf '%s' "$readiness" | jq -r '.generated_at // ""')" >> "$GITHUB_OUTPUT"
+          echo "snapshot_as_of=$(printf '%s' "$readiness" | jq -r '.snapshot_as_of // ""')" >> "$GITHUB_OUTPUT"
+          echo "information_cutoff=$(printf '%s' "$readiness" | jq -r '.information_cutoff // ""')" >> "$GITHUB_OUTPUT"
           echo "data_date=$(printf '%s' "$readiness" | jq -r '.data_date // ""')" >> "$GITHUB_OUTPUT"
+          echo "blocking=$(printf '%s' "$readiness" | jq -r '.blocking // ""')" >> "$GITHUB_OUTPUT"
 
       - name: Write workflow summary
         if: always()
@@ -425,9 +428,12 @@ jobs:
           INSIDE_RECOVERY_WINDOW: ${{ steps.context.outputs.inside_recovery_window }}
           SHOULD_GENERATE: ${{ steps.decision.outputs.should_generate }}
           CURRENT_GENERATED_AT: ${{ steps.readiness.outputs.generated_at }}
+          CURRENT_SNAPSHOT_AS_OF: ${{ steps.readiness.outputs.snapshot_as_of }}
+          CURRENT_INFORMATION_CUTOFF: ${{ steps.readiness.outputs.information_cutoff }}
           CURRENT_DATA_DATE: ${{ steps.readiness.outputs.data_date }}
           CURRENT_MARKET_PHASE: ${{ steps.readiness.outputs.market_phase }}
           CURRENT_PORTFOLIO_STATUS: ${{ steps.readiness.outputs.portfolio_status }}
+          CURRENT_BLOCKING: ${{ steps.readiness.outputs.blocking }}
           READINESS_FRESHNESS: ${{ steps.readiness.outputs.freshness }}
           READINESS_REASON: ${{ steps.readiness.outputs.reason }}
           READINESS_STATE_CODE: ${{ steps.readiness.outputs.state_code }}
@@ -439,7 +445,10 @@ jobs:
           FINAL_FRESH: ${{ steps.final.outputs.fresh }}
           FINAL_DEGRADED: ${{ steps.final.outputs.degraded }}
           FINAL_GENERATED_AT: ${{ steps.final.outputs.generated_at }}
+          FINAL_SNAPSHOT_AS_OF: ${{ steps.final.outputs.snapshot_as_of }}
+          FINAL_INFORMATION_CUTOFF: ${{ steps.final.outputs.information_cutoff }}
           FINAL_DATA_DATE: ${{ steps.final.outputs.data_date }}
+          FINAL_BLOCKING: ${{ steps.final.outputs.blocking }}
         run: |
           summary_snapshot="data/portfolio/snapshots/${TARGET_DATE}/${PHASE}.json"
           if [ ! -f "$summary_snapshot" ]; then
@@ -448,6 +457,7 @@ jobs:
           snapshot_as_of="$(jq -r '.snapshot_as_of // empty' "$summary_snapshot" 2>/dev/null || true)"
           snapshot_status="$(jq -r '.status // empty' "$summary_snapshot" 2>/dev/null || true)"
           snapshot_completeness="$(jq -r '.completeness // empty' "$summary_snapshot" 2>/dev/null || true)"
+          snapshot_warnings="$(jq -r '.data_quality.warnings_count // empty' "$summary_snapshot" 2>/dev/null || true)"
           provider="$(jq -r '.provenance.provider // empty' "$summary_snapshot" 2>/dev/null || true)"
           pipeline_health="$(jq -r '.status // empty' data/portfolio/pipeline_health.json 2>/dev/null || true)"
           if [ "$FINAL_DEGRADED" = "true" ]; then
@@ -491,9 +501,12 @@ jobs:
             echo
             echo "Current snapshot:"
             echo "- generated_at: ${CURRENT_GENERATED_AT:-unavailable}"
+            echo "- snapshot_as_of: ${CURRENT_SNAPSHOT_AS_OF:-unavailable}"
+            echo "- information_cutoff: ${CURRENT_INFORMATION_CUTOFF:-unavailable}"
             echo "- data_date: ${CURRENT_DATA_DATE:-unavailable}"
             echo "- market_phase: ${CURRENT_MARKET_PHASE:-unavailable}"
             echo "- portfolio_status: ${CURRENT_PORTFOLIO_STATUS:-unavailable}"
+            echo "- blocking: ${CURRENT_BLOCKING:-unavailable}"
             echo
             echo "Readiness:"
             echo "- ${READINESS_FRESHNESS:-not-checked}"
@@ -519,8 +532,11 @@ jobs:
             echo "Final:"
             echo "- snapshot fresh: ${FINAL_FRESH:-false}"
             echo "- snapshot_as_of: ${snapshot_as_of:-unavailable}"
+            echo "- information_cutoff: ${FINAL_INFORMATION_CUTOFF:-unavailable}"
             echo "- snapshot status: ${snapshot_status:-unavailable}"
             echo "- completeness: ${snapshot_completeness:-unavailable}"
+            echo "- blocking: ${FINAL_BLOCKING:-unavailable}"
+            echo "- warnings_count: ${snapshot_warnings:-unavailable}"
             echo "- pipeline health: ${pipeline_health:-unavailable}"
             echo "- final generated_at: ${FINAL_GENERATED_AT:-unavailable}"
             echo "- final data_date: ${FINAL_DATA_DATE:-unavailable}"

@@ -37,6 +37,7 @@ from scripts.portfolio_phase_policy import (
     SHANGHAI_TZ,
     validate_phase_time,
 )
+from scripts.portfolio_snapshot_contract import apply_business_times, apply_data_quality
 from src.core.trading_calendar import get_effective_trading_date, is_market_open
 
 LOGGER = logging.getLogger("portfolio_market_data")
@@ -990,11 +991,6 @@ def build_payload(
             "morning_close" if phase == "midday" else
             "official_close" if phase == "close" else "intraday"
         ),
-        "snapshot_as_of": (
-            datetime.combine(data_date, time(15, 0), SHANGHAI_TZ).isoformat()
-            if phase in {"premarket", "close"}
-            else current.isoformat()
-        ),
         "data_date": data_date.isoformat(),
         "status": (
             "partial"
@@ -1020,6 +1016,21 @@ def build_payload(
         "errors": errors,
         "provenance": {"generation_mode": generation_mode},
     }
+    apply_business_times(
+        payload,
+        phase=phase,
+        trading_date=trading_date,
+        data_date=data_date,
+        generated_at=current,
+    )
+    if phase in REPORT_PHASES:
+        apply_data_quality(
+            payload,
+            phase=phase,
+            portfolio=portfolio,
+            trading_date=trading_date,
+            expected_data_date=data_date,
+        )
     if phase in REPORT_PHASES:
         payload["generation_mode"] = generation_mode
     return payload

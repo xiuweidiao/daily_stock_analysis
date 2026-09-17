@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime
 from typing import Any, Mapping
 
 import pandas as pd
@@ -15,7 +15,8 @@ from scripts.portfolio_intraday_history import (
     IntradayHistoryResult,
     exact_morning_session,
 )
-from scripts.portfolio_phase_policy import SHANGHAI_TZ, as_shanghai_time
+from scripts.portfolio_phase_policy import as_shanghai_time
+from scripts.portfolio_snapshot_contract import apply_business_times, apply_data_quality
 
 
 def _number(value: Any) -> float | None:
@@ -291,12 +292,11 @@ def reconstruct_midday_snapshot(
         item.get("status") == "partial" for item in [*stocks, *benchmarks]
     )
     status = "ok" if core_usable and benchmark_usable and not core_missing else "partial"
-    return {
+    payload = {
         "schema_version": "2.0",
         "trading_date": target_date.isoformat(),
         "market_phase": "midday",
         "snapshot_kind": "morning_close",
-        "snapshot_as_of": datetime.combine(target_date, time(11, 30), SHANGHAI_TZ).isoformat(),
         "generated_at": current.isoformat(),
         "timezone": "Asia/Shanghai",
         "generation_mode": "reconstructed",
@@ -324,3 +324,18 @@ def reconstruct_midday_snapshot(
             "reconstructed_at": current.isoformat(),
         },
     }
+    apply_business_times(
+        payload,
+        phase="midday",
+        trading_date=target_date,
+        data_date=target_date,
+        generated_at=current,
+    )
+    apply_data_quality(
+        payload,
+        phase="midday",
+        portfolio=portfolio,
+        trading_date=target_date,
+        expected_data_date=target_date,
+    )
+    return payload
