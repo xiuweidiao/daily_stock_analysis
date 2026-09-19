@@ -1,0 +1,24 @@
+name = "daily-stock-analysis-portfolio-scheduler"
+main = "src/index.js"
+compatibility_date = "2026-09-18"
+workers_dev = false
+
+[vars]
+GITHUB_OWNER = "xiuweidiao"
+GITHUB_REPO = "daily_stock_analysis"
+GITHUB_REF = "main"
+
+[triggers]
+crons = [
+  "40 23 * * 0-4", # 07:40 Asia/Shanghai Monday-Friday
+  "40 0 * * 1-5",  # 08:40 Asia/Shanghai Monday-Friday
+  "40 3 * * 1-5",  # 11:40 Asia/Shanghai Monday-Friday
+  "0 4 * * 1-5",   # 12:00 Asia/Shanghai Monday-Friday
+  "10 7 * * 1-5",  # 15:10 Asia/Shanghai Monday-Friday
+  "30 7 * * 1-5",  # 15:30 Asia/Shanghai Monday-Friday
+  "30 10 * * 1-5", # 18:30 Asia/Shanghai Monday-Friday
+]
+
+[observability]
+enabled = true
+head_sampling_rate = 1

@@ -91,4 +91,7 @@ static/
 /apps/dsa-desktop/dist/
 /apps/dsa-desktop/node_modules/
 /node_modules/
+/cloudflare/portfolio-scheduler/node_modules/
+/cloudflare/portfolio-scheduler/.wrangler/
+/cloudflare/portfolio-scheduler/.dev.vars
 docs/specs/
