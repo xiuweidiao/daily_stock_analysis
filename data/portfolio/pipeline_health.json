@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "checked_at": "2026-09-21T08:28:43.354582+08:00",
+  "checked_at": "2026-09-21T17:16:33.758992+08:00",
   "latest_trading_date": "2026-09-21",
   "manifest_path": "data/portfolio/snapshots/2026-09-21/manifest.json",
   "status": "degraded",
@@ -18,15 +18,15 @@
       "reason": null
     },
     "midday": {
-      "lifecycle_status": "pending",
-      "snapshot_status": null,
-      "completeness": null,
-      "generation_mode": null,
-      "snapshot_as_of": null,
-      "information_cutoff": null,
-      "blocking": null,
-      "warnings_count": 0,
-      "path": null,
+      "lifecycle_status": "available",
+      "snapshot_status": "partial",
+      "completeness": "partial",
+      "generation_mode": "reconstructed",
+      "snapshot_as_of": "2026-09-21T11:30:00+08:00",
+      "information_cutoff": "2026-09-21T11:30:00+08:00",
+      "blocking": false,
+      "warnings_count": 16,
+      "path": "data/portfolio/snapshots/2026-09-21/midday.json",
       "reason": null
     },
     "close": {
@@ -45,6 +45,10 @@
   "issues": [
     {
       "phase": "premarket",
+      "reason": "CORE_FIELDS_UNAVAILABLE"
+    },
+    {
+      "phase": "midday",
       "reason": "CORE_FIELDS_UNAVAILABLE"
     }
   ],
