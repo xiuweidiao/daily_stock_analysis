@@ -1,9 +1,11 @@
 {
   "schema_version": "2.0",
-  "checked_at": "2026-09-25T19:58:54.231213+08:00",
-  "latest_trading_date": "2026-09-25",
-  "manifest_path": "data/portfolio/snapshots/2026-09-25/manifest.json",
-  "status": "degraded",
+  "trading_date": "2026-09-25",
+  "expected_phases": [
+    "premarket",
+    "midday",
+    "close"
+  ],
   "phases": {
     "premarket": {
       "lifecycle_status": "pending",
@@ -42,11 +44,5 @@
       "reason": null
     }
   },
-  "issues": [
-    {
-      "phase": "close",
-      "reason": "CORE_FIELDS_UNAVAILABLE"
-    }
-  ],
-  "last_successful_commit": null
+  "updated_at": "2026-09-25T19:58:54.231213+08:00"
 }
