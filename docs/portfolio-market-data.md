@@ -102,6 +102,8 @@ python scripts/portfolio_market_data.py --phase all --allow-phase-time-override
 - `06:23 UTC` = `14:23 Asia/Shanghai`：close 主任务，在 `15:05` 前启动时等待至 `15:05`
 - `07:43 / 08:43 / 09:03 UTC` = `15:43 / 16:43 / 17:03 Asia/Shanghai`：close 三次自动补偿
 
+Cloudflare Workers Cron 可作为独立主时钟，通过 GitHub `workflow_dispatch` 唤醒完全相同的 workflow；GitHub Schedule 保留为备用时钟。Worker 不抓行情、不写仓库，也不复制 readiness/recovery/validator。部署、最小权限、UTC 映射、验证和回滚步骤见 [Portfolio Cloudflare Scheduler](portfolio-cloudflare-scheduler.md)。Actions Summary 会记录 `Trigger source: cloudflare_cron` 和预期北京时间业务 slot；重复唤醒仍由现有 readiness、共享 concurrency 和远端 freshness 检查安全收敛为 no-op。
+
 独立 workflow `.github/workflows/portfolio-close-watchdog.yml` 不依赖上述 close run 是否曾被 GitHub 创建。它在北京时间 `16:17 / 17:17 / 18:17 / 19:17 / 20:17`（UTC `08:17 / 09:17 / 10:17 / 11:17 / 12:17`）执行状态驱动检查：目标日期不是交易日时输出 `NON_TRADING_DAY`；远端 close 已通过正式契约时输出 `CLOSE_ALREADY_FRESH` 且不调用生成器；missing/stale/invalid 时使用完整日线 recovery，验证、提交并重新读取远端，成功输出 `CLOSE_RECOVERED`，否则以 `CLOSE_RECOVERY_FAILED` 结束。多个 watchdog 是独立恢复机会，不是无条件重复生成任务。
 
 三个正式阶段统一使用 `scripts/portfolio_snapshot_readiness.py`。workflow 先由 nominal cron slot 解析目标业务日期，再计算期望 `data_date`，不会再用 runner 实际启动日期代替任务日期。fresh 时三阶段都跳过 generator 和 commit；missing/stale/invalid 时优先 live 生成，live 语义已过则切换真实历史数据恢复。midday 恢复必须拿到目标日精确 `11:30` 分钟 bar；拿不到时在 manifest 标记 `missed`，不生成假快照。

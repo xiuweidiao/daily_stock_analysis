@@ -27,6 +27,15 @@ on:
           - midday
           - close
           - intraday
+      trigger_source:
+        description: Scheduler source for diagnostics
+        required: false
+        default: workflow_dispatch
+        type: string
+      expected_slot:
+        description: Expected Asia/Shanghai business slot (HH:MM)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -70,6 +79,8 @@ jobs:
       PHASE: ${{ needs.resolve_phase.outputs.phase }}
       EVENT_NAME: ${{ github.event_name }}
       SCHEDULE_CRON: ${{ github.event.schedule }}
+      TRIGGER_SOURCE: ${{ github.event_name == 'schedule' && 'github_schedule' || inputs.trigger_source || 'workflow_dispatch' }}
+      DISPATCH_EXPECTED_SLOT: ${{ inputs.expected_slot }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -415,7 +426,7 @@ jobs:
       - name: Write workflow summary
         if: always()
         env:
-          EXPECTED_SLOT: ${{ steps.context.outputs.expected_slot }}
+          CONTEXT_EXPECTED_SLOT: ${{ steps.context.outputs.expected_slot }}
           TARGET_DATE: ${{ steps.context.outputs.target_date }}
           EXPECTED_DATA_DATE: ${{ steps.context.outputs.expected_data_date }}
           CUTOFF: ${{ steps.context.outputs.cutoff }}
@@ -450,6 +461,7 @@ jobs:
           FINAL_DATA_DATE: ${{ steps.final.outputs.data_date }}
           FINAL_BLOCKING: ${{ steps.final.outputs.blocking }}
         run: |
+          expected_slot="${DISPATCH_EXPECTED_SLOT:-$CONTEXT_EXPECTED_SLOT}"
           summary_snapshot="data/portfolio/snapshots/${TARGET_DATE}/${PHASE}.json"
           if [ ! -f "$summary_snapshot" ]; then
             summary_snapshot="data/portfolio/${PHASE}.json"
@@ -484,11 +496,12 @@ jobs:
             echo "## Portfolio Market Data"
             echo
             echo "Event: ${EVENT_NAME}"
+            echo "Trigger source: ${TRIGGER_SOURCE}"
             echo "Schedule expression: ${SCHEDULE_CRON:-manual}"
             echo "Resolved phase: ${PHASE}"
             echo
             echo "Expected:"
-            echo "- expected schedule slot: ${EXPECTED_SLOT:-unavailable}"
+            echo "- expected schedule slot: ${expected_slot:-unavailable}"
             echo "- expected trading date: ${TARGET_DATE:-unavailable}"
             echo "- expected data_date: ${EXPECTED_DATA_DATE:-unavailable}"
             echo "- cutoff: ${CUTOFF:-none}"
