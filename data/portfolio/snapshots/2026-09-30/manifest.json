@@ -20,7 +20,7 @@
       "reason": null
     },
     "midday": {
-      "lifecycle_status": "pending",
+      "lifecycle_status": "missed",
       "snapshot_status": null,
       "completeness": null,
       "generation_mode": null,
@@ -29,7 +29,7 @@
       "blocking": null,
       "warnings_count": 0,
       "path": null,
-      "reason": null
+      "reason": "sina_stock_zh_a_minute failed for sh688012: ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"
     },
     "close": {
       "lifecycle_status": "pending",
@@ -44,5 +44,5 @@
       "reason": null
     }
   },
-  "updated_at": "2026-09-30T09:31:03.860506+08:00"
+  "updated_at": "2026-09-30T17:58:54.468690+08:00"
 }

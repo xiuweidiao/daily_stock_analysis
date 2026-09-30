@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "checked_at": "2026-09-30T09:31:03.860506+08:00",
+  "checked_at": "2026-09-30T17:58:54.468690+08:00",
   "latest_trading_date": "2026-09-30",
   "manifest_path": "data/portfolio/snapshots/2026-09-30/manifest.json",
   "status": "degraded",
@@ -18,7 +18,7 @@
       "reason": null
     },
     "midday": {
-      "lifecycle_status": "pending",
+      "lifecycle_status": "missed",
       "snapshot_status": null,
       "completeness": null,
       "generation_mode": null,
@@ -27,7 +27,7 @@
       "blocking": null,
       "warnings_count": 0,
       "path": null,
-      "reason": null
+      "reason": "sina_stock_zh_a_minute failed for sh688012: ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"
     },
     "close": {
       "lifecycle_status": "pending",
@@ -46,6 +46,10 @@
     {
       "phase": "premarket",
       "reason": "CORE_FIELDS_UNAVAILABLE"
+    },
+    {
+      "phase": "midday",
+      "reason": "sina_stock_zh_a_minute failed for sh688012: ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"
     }
   ],
   "last_successful_commit": null
