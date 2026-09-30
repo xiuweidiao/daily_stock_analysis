@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "checked_at": "2026-09-30T17:58:54.468690+08:00",
+  "checked_at": "2026-09-30T18:08:07.758439+08:00",
   "latest_trading_date": "2026-09-30",
   "manifest_path": "data/portfolio/snapshots/2026-09-30/manifest.json",
   "status": "degraded",
@@ -18,16 +18,16 @@
       "reason": null
     },
     "midday": {
-      "lifecycle_status": "missed",
-      "snapshot_status": null,
-      "completeness": null,
-      "generation_mode": null,
-      "snapshot_as_of": null,
-      "information_cutoff": null,
-      "blocking": null,
-      "warnings_count": 0,
-      "path": null,
-      "reason": "sina_stock_zh_a_minute failed for sh688012: ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"
+      "lifecycle_status": "available",
+      "snapshot_status": "partial",
+      "completeness": "partial",
+      "generation_mode": "reconstructed",
+      "snapshot_as_of": "2026-09-30T11:30:00+08:00",
+      "information_cutoff": "2026-09-30T11:30:00+08:00",
+      "blocking": false,
+      "warnings_count": 16,
+      "path": "data/portfolio/snapshots/2026-09-30/midday.json",
+      "reason": null
     },
     "close": {
       "lifecycle_status": "pending",
@@ -49,7 +49,7 @@
     },
     {
       "phase": "midday",
-      "reason": "sina_stock_zh_a_minute failed for sh688012: ConnectionError: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))"
+      "reason": "CORE_FIELDS_UNAVAILABLE"
     }
   ],
   "last_successful_commit": null
