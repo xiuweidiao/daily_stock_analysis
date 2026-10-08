@@ -8,6 +8,7 @@ on:
       - '.github/workflows/portfolio-market-data*.yml'
       - '.github/workflows/portfolio-close-watchdog.yml'
       - '.github/workflows/portfolio-snapshot-repair.yml'
+      - 'cloudflare/portfolio-scheduler/**'
       - 'scripts/portfolio_*.py'
       - 'data_provider/**'
       - 'src/**'
@@ -17,6 +18,20 @@ permissions:
   contents: read
 
 jobs:
+  cloudflare-scheduler-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Test Cloudflare dispatcher
+        run: npm --prefix cloudflare/portfolio-scheduler test
+
   import-smoke:
     runs-on: ubuntu-latest
     steps:
